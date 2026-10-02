@@ -1,0 +1,32 @@
+{
+  "name": "playwright-qa-crawler",
+  "version": "1.0.0",
+  "description": "Automated QA Crawler and Visual/Functional Auditor using Playwright, TypeScript, and AI",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "crawl": "tsx src/index.ts",
+    "qa": "tsx src/index.ts",
+    "analyze": "tsx src/ai-analyzer.ts",
+    "qa:all": "tsx src/index.ts --analyze",
+    "report": "tsx src/open-report.ts",
+    "clean": "tsx src/clean.ts",
+    "clear": "tsx src/clean.ts",
+    "test": "playwright test"
+  },
+  "keywords": ["playwright", "qa", "crawler", "gemini", "ai-qa", "visual-regression", "typescript"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@google/genai": "^2.3.0",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
