@@ -4,9 +4,30 @@ import { CrawlConfig } from './types.js';
 
 dotenv.config();
 
+function parseBooleanEnv(value: string | undefined, defaultValue: boolean): boolean {
+  if (value === undefined || value.trim() === '') return defaultValue;
+  const normalized = value.trim().toLowerCase();
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  return defaultValue;
+}
+
+function parseNumberEnv(value: string | undefined, fallback: number): number {
+  if (!value || value.trim() === '') return fallback;
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+export function ensureAbsoluteUrl(urlStr: string): string {
+  const trimmed = (urlStr || '').trim();
+  if (!trimmed) return 'https://example.com';
+  return /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+}
+
 export function urlToOutputDirName(urlStr: string): string {
   try {
-    const parsed = new URL(urlStr);
+    const safeUrl = ensureAbsoluteUrl(urlStr);
+    const parsed = new URL(safeUrl);
     let host = parsed.hostname.replace(/^www\./, '');
     if (parsed.port) {
       host += `_${parsed.port}`;
@@ -22,7 +43,8 @@ export function urlToOutputDirName(urlStr: string): string {
 }
 
 export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlConfig {
-  const targetUrl = overrides.baseUrl || process.env.TARGET_URL || 'https://example.com';
+  const rawTargetUrl = overrides.baseUrl || process.env.TARGET_URL || 'https://example.com';
+  const targetUrl = ensureAbsoluteUrl(rawTargetUrl);
   let siteName = overrides.siteName || process.env.SITE_NAME || '';
 
   if (!siteName) {
@@ -50,11 +72,15 @@ export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlCon
     outputDir = path.resolve(process.cwd(), baseOutputDir, siteFolderName);
   }
 
+  const envHeadless = process.env.HEADLESS ?? process.env.headless;
+  const envAnnotateAlt = process.env.ANNOTATE_ALT ?? process.env.annotate_alt;
+  const envCheckQuality = process.env.CHECK_IMAGE_QUALITY ?? process.env.check_image_quality;
+
   return {
     baseUrl: targetUrl,
     siteName,
-    maxPages: overrides.maxPages ?? Number(process.env.MAX_PAGES || 15),
-    maxDepth: overrides.maxDepth ?? Number(process.env.MAX_DEPTH || 2),
+    maxPages: overrides.maxPages ?? parseNumberEnv(process.env.MAX_PAGES, 15),
+    maxDepth: overrides.maxDepth ?? parseNumberEnv(process.env.MAX_DEPTH, 2),
     viewports: [
       {
         name: 'desktop',
@@ -73,18 +99,13 @@ export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlCon
       },
     ],
     fullPageScreenshot: overrides.fullPageScreenshot ?? true,
-    timeoutMs: overrides.timeoutMs ?? Number(process.env.TIMEOUT_MS || 30000),
-    delayBetweenPagesMs: overrides.delayBetweenPagesMs ?? Number(process.env.DELAY_MS || 1000),
+    timeoutMs: overrides.timeoutMs ?? parseNumberEnv(process.env.TIMEOUT_MS, 30000),
+    delayBetweenPagesMs: overrides.delayBetweenPagesMs ?? parseNumberEnv(process.env.DELAY_MS, 1000),
     excludePatterns: [
       'logout',
       'signout',
       'auth/logout',
-      '\\.pdf$',
-      '\\.zip$',
-      '\\.tar$',
-      '\\.gz$',
-      '\\.mp4$',
-      '\\.mp3$',
+      '\\.(pdf|zip|tar|gz|mp4|mp3|docx|xlsx|pptx|csv|xml|kml|json|svg|png|jpg|jpeg|webp)$',
       'mailto:',
       'tel:',
       'javascript:',
@@ -92,7 +113,13 @@ export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlCon
     ],
     outputDir,
     customUrls: overrides.customUrls,
-    headless: overrides.headless ?? (process.env.HEADLESS !== 'false'),
-    annotateAlt: overrides.annotateAlt ?? (process.env.ANNOTATE_ALT !== 'false'),
+    headless: overrides.headless ?? parseBooleanEnv(envHeadless, true),
+    annotateAlt: overrides.annotateAlt ?? parseBooleanEnv(envAnnotateAlt, true),
+    checkImageQuality: overrides.checkImageQuality ?? parseBooleanEnv(envCheckQuality, true),
+    minHdRatio: overrides.minHdRatio ?? parseNumberEnv(process.env.IMAGE_MIN_HD_RATIO, 1.9),
+    maxOversizedRatio: overrides.maxOversizedRatio ?? parseNumberEnv(process.env.IMAGE_MAX_OVERSIZED_RATIO, 3.5),
+    maxImageSizeKb: overrides.maxImageSizeKb ?? parseNumberEnv(process.env.IMAGE_MAX_SIZE_KB, 500),
+    sitemapUrl: overrides.sitemapUrl || process.env.SITEMAP_URL || undefined,
+    crawlMode: overrides.crawlMode,
   };
 }

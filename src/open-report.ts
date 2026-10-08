@@ -7,10 +7,17 @@ import { urlToOutputDirName } from './config.js';
 dotenv.config();
 
 function findReportPath(): string | null {
-  const argTarget = process.argv[2];
+  let argTarget: string | undefined = process.argv[2];
+  const targetIdx = process.argv.findIndex((a) => a === '-t' || a === '--target');
+  if (targetIdx !== -1 && process.argv[targetIdx + 1]) {
+    argTarget = process.argv[targetIdx + 1];
+  } else if (argTarget && argTarget.startsWith('-')) {
+    argTarget = process.argv.slice(2).find((a) => !a.startsWith('-'));
+  }
+
   const outputBase = path.resolve(process.cwd(), 'output');
 
-  // 1. Specified via CLI argument (e.g. npm run report -- smilesbydocford.com or full URL)
+  // 1. Specified via CLI argument (e.g. npm run report -- smilesbydocford.com or -t smilesbydocford.com)
   if (argTarget) {
     const folderName = argTarget.includes('://') ? urlToOutputDirName(argTarget) : argTarget;
     const directPath = path.join(outputBase, folderName, 'index.html');

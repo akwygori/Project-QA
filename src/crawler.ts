@@ -1,6 +1,11 @@
 import { Page } from 'playwright';
 
-export function normalizeUrl(rawUrl: string, baseUrl: string, excludePatterns: string[] = []): string | null {
+export function normalizeUrl(
+  rawUrl: string,
+  baseUrl: string,
+  excludePatterns: string[] = [],
+  preserveTrailingSlash: boolean = false
+): string | null {
   try {
     const base = new URL(baseUrl);
     const resolved = new URL(rawUrl, base.origin);
@@ -10,17 +15,21 @@ export function normalizeUrl(rawUrl: string, baseUrl: string, excludePatterns: s
       return null;
     }
 
-    // Domain check: must belong to same domain or subdomain
-    if (resolved.hostname !== base.hostname && !resolved.hostname.endsWith(`.${base.hostname}`)) {
+    // Domain check: must belong to same domain or subdomain (handles www vs non-www)
+    const normalizeHost = (h: string) => h.toLowerCase().replace(/^www\./, '');
+    const baseHost = normalizeHost(base.hostname);
+    const resolvedHost = normalizeHost(resolved.hostname);
+
+    if (resolvedHost !== baseHost && !resolvedHost.endsWith(`.${baseHost}`)) {
       return null;
     }
 
     // Strip hash / anchor
     resolved.hash = '';
 
-    // Normalize trailing slash (keep root / as is, remove trailing / for subpaths)
+    // Normalize trailing slash (keep root / as is, remove trailing / for subpaths unless preserveTrailingSlash is true)
     let cleanUrl = resolved.toString();
-    if (resolved.pathname !== '/' && cleanUrl.endsWith('/')) {
+    if (!preserveTrailingSlash && resolved.pathname !== '/' && cleanUrl.endsWith('/')) {
       cleanUrl = cleanUrl.slice(0, -1);
     }
 

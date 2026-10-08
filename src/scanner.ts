@@ -34,7 +34,20 @@ export class PageScanner {
   }
 
   private async auditAndAnnotateImages(page: Page): Promise<any> {
-    return await page.evaluate((annotate: boolean) => {
+    const opts = {
+      annotate: this.config.annotateAlt ?? true,
+      checkQuality: this.config.checkImageQuality ?? true,
+      minHdRatio: this.config.minHdRatio ?? 1.9,
+      maxOversizedRatio: this.config.maxOversizedRatio ?? 3.5,
+      maxImageSizeKb: this.config.maxImageSizeKb ?? 500,
+    };
+
+    return await page.evaluate((options) => {
+      // Polyfill esbuild __name helper if injected into browser context
+      if (typeof (window as any).__name === 'undefined') {
+        (window as any).__name = (fn: any) => fn;
+      }
+
       const imgElements = Array.from(document.querySelectorAll('img'));
       const auditData: any[] = [];
 
@@ -42,8 +55,26 @@ export class PageScanner {
       let missingAltCount = 0;
       let emptyAltCount = 0;
 
+      let retinaHdCount = 0;
+      let standardResCount = 0;
+      let blurryCount = 0;
+      let oversizedCount = 0;
+      let distortedCount = 0;
+      let missingDimensionsCount = 0;
+
+      // Helper function to format bytes to string
+      const formatBytes = (bytes: number): string => {
+        if (!bytes || bytes <= 0) return '';
+        if (bytes < 1024) return bytes + ' B';
+        const kb = bytes / 1024;
+        if (kb < 1024) return kb.toFixed(1) + ' KB';
+        return (kb / 1024).toFixed(2) + ' MB';
+      };
+
       // Remove previous overlays if any
       document.querySelectorAll('.playwright-qa-alt-overlay').forEach((el) => el.remove());
+
+      const dpr = window.devicePixelRatio || 1;
 
       imgElements.forEach((img) => {
         const hasAlt = img.hasAttribute('alt');
@@ -62,70 +93,230 @@ export class PageScanner {
         const rect = img.getBoundingClientRect();
         const isVisible = rect.width > 0 && rect.height > 0 && window.getComputedStyle(img).display !== 'none';
 
+        // 1. Image Graphic & Resolution Metrics
+        const naturalWidth = img.naturalWidth || 0;
+        const naturalHeight = img.naturalHeight || 0;
+        const renderedWidth = Math.round(rect.width);
+        const renderedHeight = Math.round(rect.height);
+        const hasExplicitDimensions = img.hasAttribute('width') && img.hasAttribute('height');
+        if (!hasExplicitDimensions) {
+          missingDimensionsCount++;
+        }
+
+        const currentSrc = img.currentSrc || img.src || '';
+
+        // Density Ratio (Sharpness factor)
+        const densityRatio = renderedWidth > 0 && naturalWidth > 0
+          ? Math.round(((naturalWidth / renderedWidth) + Number.EPSILON) * 100) / 100
+          : 1;
+
+        // Effective DPR factor
+        const effectiveDprRatio = renderedWidth > 0 && naturalWidth > 0
+          ? Math.round(((naturalWidth / (renderedWidth * dpr)) + Number.EPSILON) * 100) / 100
+          : 1;
+
+        // Aspect Ratio Delta
+        let aspectRatioMismatch = false;
+        let aspectRatioDeltaPct = 0;
+        if (naturalWidth > 0 && naturalHeight > 0 && renderedWidth > 0 && renderedHeight > 0) {
+          const natAR = naturalWidth / naturalHeight;
+          const renAR = renderedWidth / renderedHeight;
+          aspectRatioDeltaPct = Math.round(Math.abs((natAR - renAR) / natAR) * 100);
+          if (aspectRatioDeltaPct > 8) {
+            aspectRatioMismatch = true;
+          }
+        }
+
+        // File size & format via Performance Resource Timing
+        let fileSizeBytes: number | undefined = undefined;
+        let fileFormat = 'unknown';
+
+        if (currentSrc) {
+          if (currentSrc.startsWith('data:image/svg') || currentSrc.includes('.svg')) {
+            fileFormat = 'svg';
+          } else if (currentSrc.includes('.webp')) {
+            fileFormat = 'webp';
+          } else if (currentSrc.includes('.avif')) {
+            fileFormat = 'avif';
+          } else if (currentSrc.includes('.png')) {
+            fileFormat = 'png';
+          } else if (currentSrc.includes('.jpg') || currentSrc.includes('.jpeg')) {
+            fileFormat = 'jpg';
+          } else if (currentSrc.includes('.gif')) {
+            fileFormat = 'gif';
+          }
+
+          try {
+            const perfEntries = window.performance.getEntriesByName(currentSrc);
+            if (perfEntries && perfEntries.length > 0) {
+              const latest = perfEntries[perfEntries.length - 1] as PerformanceResourceTiming;
+              const size = latest.transferSize || latest.encodedBodySize || latest.decodedBodySize;
+              if (size && size > 0) {
+                fileSizeBytes = size;
+              }
+            }
+          } catch {
+            // Ignore performance timing access errors
+          }
+        }
+
+        // Determine Quality Status based on Enterprise Standard
+        let qualityStatus: 'HD' | 'SD' | 'BLURRY' | 'OVERSIZED' | 'DISTORTED' | 'VECTOR' = 'SD';
+        if (fileFormat === 'svg' || currentSrc.endsWith('.svg')) {
+          qualityStatus = 'VECTOR';
+        } else if (!isVisible || renderedWidth === 0 || renderedHeight === 0 || naturalWidth === 0) {
+          qualityStatus = 'SD';
+        } else if (aspectRatioMismatch) {
+          qualityStatus = 'DISTORTED';
+          distortedCount++;
+        } else if (densityRatio < 1.0) {
+          qualityStatus = 'BLURRY';
+          blurryCount++;
+        } else if (densityRatio > options.maxOversizedRatio || (fileSizeBytes && fileSizeBytes > options.maxImageSizeKb * 1024)) {
+          qualityStatus = 'OVERSIZED';
+          oversizedCount++;
+        } else if (densityRatio >= options.minHdRatio) {
+          qualityStatus = 'HD';
+          retinaHdCount++;
+        } else {
+          qualityStatus = 'SD';
+          standardResCount++;
+        }
+
         auditData.push({
-          src: img.currentSrc || img.src || '',
+          src: currentSrc,
           alt: altValue,
           hasAlt,
           isEmptyAlt: isEmpty,
-          width: Math.round(rect.width),
-          height: Math.round(rect.height),
+          width: renderedWidth,
+          height: renderedHeight,
+          naturalWidth,
+          naturalHeight,
+          densityRatio,
+          effectiveDprRatio,
+          aspectRatioMismatch,
+          aspectRatioDeltaPct,
+          fileSizeBytes,
+          fileFormat,
+          hasExplicitDimensions,
+          qualityStatus,
           elementId: img.id || undefined,
           className: img.className || undefined,
         });
 
-        if (annotate && isVisible) {
-          // Outline the image directly
+        // 2. Visual Outline & Dual-Pill Badge Overlay on Screenshot
+        if (options.annotate && isVisible) {
+          // Outline styling priority
           if (isMissing) {
             img.style.outline = '4px solid #ef4444';
+            img.style.outlineOffset = '-3px';
+          } else if (qualityStatus === 'BLURRY') {
+            img.style.outline = '4px solid #dc2626';
+            img.style.outlineOffset = '-3px';
+          } else if (qualityStatus === 'DISTORTED') {
+            img.style.outline = '3px solid #8b5cf6';
+            img.style.outlineOffset = '-3px';
+          } else if (qualityStatus === 'OVERSIZED') {
+            img.style.outline = '3px dashed #f59e0b';
+            img.style.outlineOffset = '-3px';
+          } else if (qualityStatus === 'HD') {
+            img.style.outline = '3px solid #10b981';
             img.style.outlineOffset = '-3px';
           } else if (isEmpty) {
             img.style.outline = '3px dashed #f59e0b';
             img.style.outlineOffset = '-3px';
           } else {
-            img.style.outline = '3px solid #10b981';
-            img.style.outlineOffset = '-3px';
+            img.style.outline = '2px solid #059669';
+            img.style.outlineOffset = '-2px';
           }
 
-          // Add badge overlay on top of the image
+          // Container badge overlay on top of the image
           const badge = document.createElement('div');
           badge.className = 'playwright-qa-alt-overlay';
           badge.style.position = 'absolute';
           badge.style.top = `${rect.top + window.scrollY}px`;
           badge.style.left = `${rect.left + window.scrollX}px`;
           badge.style.zIndex = '2147483647';
-          badge.style.padding = '4px 8px';
-          badge.style.borderRadius = '5px';
-          badge.style.fontFamily = 'Consolas, Menlo, Monaco, "Courier New", monospace';
-          badge.style.fontSize = '12px';
-          badge.style.fontWeight = 'bold';
-          badge.style.lineHeight = '1.35';
+          badge.style.display = 'flex';
+          badge.style.flexDirection = 'column';
+          badge.style.gap = '3px';
           badge.style.pointerEvents = 'none';
-          badge.style.boxShadow = '0 3px 8px rgba(0,0,0,0.85)';
+          badge.style.fontFamily = 'Consolas, Menlo, Monaco, "Courier New", monospace';
+          badge.style.fontSize = '11px';
+          badge.style.fontWeight = 'bold';
+          badge.style.lineHeight = '1.3';
+          badge.style.boxShadow = '0 4px 10px rgba(0,0,0,0.85)';
           badge.style.maxWidth = `${Math.min(Math.max(rect.width, 320), window.innerWidth - 40)}px`;
-          badge.style.whiteSpace = 'normal';
-          badge.style.wordBreak = 'break-word';
-          badge.style.color = '#ffffff';
+
+          // Pill 1: Alt Text Accessibility Status
+          const altPill = document.createElement('div');
+          altPill.style.padding = '3px 7px';
+          altPill.style.borderRadius = '4px';
+          altPill.style.whiteSpace = 'normal';
+          altPill.style.wordBreak = 'break-word';
+          altPill.style.color = '#ffffff';
 
           if (isMissing) {
-            badge.style.backgroundColor = '#dc2626'; // Red
-            badge.style.border = '1px solid #fecaca';
-            badge.innerText = `⚠️ [ALT MISSING!]`;
+            altPill.style.backgroundColor = '#dc2626'; // Red
+            altPill.style.border = '1px solid #fecaca';
+            altPill.innerText = `⚠️ [ALT MISSING!]`;
           } else if (isEmpty) {
-            badge.style.backgroundColor = '#d97706'; // Amber
-            badge.style.border = '1px solid #fef3c7';
-            badge.innerText = `🟡 alt="" (Empty / Decorative)`;
+            altPill.style.backgroundColor = '#d97706'; // Amber
+            altPill.style.border = '1px solid #fef3c7';
+            altPill.innerText = `🟡 alt="" (Decorative / Kosong)`;
           } else {
-            badge.style.backgroundColor = 'rgba(5, 150, 105, 0.96)'; // Green
-            badge.style.border = '1px solid #a7f3d0';
-            badge.innerText = `🟢 alt: "${altValue}"`;
+            altPill.style.backgroundColor = 'rgba(5, 150, 105, 0.96)'; // Green
+            altPill.style.border = '1px solid #a7f3d0';
+            altPill.innerText = `🟢 alt: "${altValue}"`;
+          }
+          badge.appendChild(altPill);
+
+          // Pill 2: Image Graphic & Quality Status (HD / Blurry / Oversized)
+          if (options.checkQuality) {
+            const qualityPill = document.createElement('div');
+            qualityPill.style.padding = '3px 7px';
+            qualityPill.style.borderRadius = '4px';
+            qualityPill.style.whiteSpace = 'normal';
+            qualityPill.style.wordBreak = 'break-word';
+            qualityPill.style.color = '#ffffff';
+
+            const sizeLabel = fileSizeBytes ? ` • ${formatBytes(fileSizeBytes)}` : '';
+            const dimLabel = `${naturalWidth}x${naturalHeight}`;
+
+            if (qualityStatus === 'HD') {
+              qualityPill.style.backgroundColor = '#047857'; // Crisp Green
+              qualityPill.style.border = '1px solid #6ee7b7';
+              qualityPill.innerText = `✨ [CRISP HD ${densityRatio}x • ${dimLabel}${sizeLabel}]`;
+            } else if (qualityStatus === 'BLURRY') {
+              qualityPill.style.backgroundColor = '#b91c1c'; // Deep Red
+              qualityPill.style.border = '1px solid #fca5a5';
+              qualityPill.innerText = `🔴 [BLURRY ${densityRatio}x • Asli ${naturalWidth}px ➔ Tampil ${renderedWidth}px PECAH!]`;
+            } else if (qualityStatus === 'DISTORTED') {
+              qualityPill.style.backgroundColor = '#7c3aed'; // Purple
+              qualityPill.style.border = '1px solid #c4b5fd';
+              qualityPill.innerText = `📐 [DISTORTED • Rasio Beda ${aspectRatioDeltaPct}%]`;
+            } else if (qualityStatus === 'OVERSIZED') {
+              qualityPill.style.backgroundColor = '#b45309'; // Amber/Orange
+              qualityPill.style.border = '1px solid #fde68a';
+              qualityPill.innerText = `⚠️ [OVERSIZED ${densityRatio}x • Terlalu Besar${sizeLabel}]`;
+            } else if (qualityStatus === 'VECTOR') {
+              qualityPill.style.backgroundColor = '#0284c7'; // Blue
+              qualityPill.style.border = '1px solid #7dd3fc';
+              qualityPill.innerText = `🔷 [SVG VECTOR • Sharp]`;
+            } else {
+              qualityPill.style.backgroundColor = 'rgba(51, 65, 85, 0.95)'; // Slate
+              qualityPill.style.border = '1px solid #94a3b8';
+              qualityPill.innerText = `🟡 [SD ${densityRatio}x • ${dimLabel}${sizeLabel}]`;
+            }
+            badge.appendChild(qualityPill);
           }
 
           document.body.appendChild(badge);
         }
       });
 
-      if (annotate && imgElements.length > 0) {
-        // Sticky/top banner in the screenshot
+      // 3. Top Banner Rekapitulasi di Screenshot
+      if (options.annotate && imgElements.length > 0) {
         const topBar = document.createElement('div');
         topBar.className = 'playwright-qa-alt-overlay';
         topBar.style.position = 'absolute';
@@ -133,23 +324,25 @@ export class PageScanner {
         topBar.style.left = '0';
         topBar.style.right = '0';
         topBar.style.zIndex = '2147483647';
-        topBar.style.backgroundColor = 'rgba(15, 23, 42, 0.95)';
+        topBar.style.backgroundColor = 'rgba(15, 23, 42, 0.97)';
         topBar.style.color = '#f8fafc';
         topBar.style.padding = '8px 16px';
-        topBar.style.fontSize = '13px';
+        topBar.style.fontSize = '12px';
         topBar.style.fontFamily = 'system-ui, -apple-system, sans-serif';
         topBar.style.fontWeight = '600';
         topBar.style.display = 'flex';
+        topBar.style.flexWrap = 'wrap';
         topBar.style.alignItems = 'center';
-        topBar.style.gap = '16px';
+        topBar.style.gap = '14px';
         topBar.style.borderBottom = '2px solid #6366f1';
-        topBar.style.boxShadow = '0 4px 12px rgba(0,0,0,0.5)';
+        topBar.style.boxShadow = '0 4px 12px rgba(0,0,0,0.6)';
 
         topBar.innerHTML = `
-          <span>🖼️ <strong>Image Alt Audit</strong> (${imgElements.length} images)</span>
-          <span style="color: #34d399;">🟢 ${withAltCount} With Alt</span>
-          <span style="color: #fbbf24;">🟡 ${emptyAltCount} Empty Alt</span>
-          <span style="color: #f87171;">🔴 ${missingAltCount} Missing Alt</span>
+          <span>🖼️ <strong>Images (${imgElements.length})</strong></span>
+          <span style="color: #cbd5e1;">|</span>
+          <span>Alt: <strong style="color: #34d399;">${withAltCount} Ok</strong> • <strong style="color: #fbbf24;">${emptyAltCount} Empty</strong> • <strong style="color: #f87171;">${missingAltCount} Missing</strong></span>
+          <span style="color: #cbd5e1;">|</span>
+          <span>Graphic: <strong style="color: #34d399;">${retinaHdCount} HD</strong> • <strong style="color: #94a3b8;">${standardResCount} SD</strong> • <strong style="color: #f87171;">${blurryCount} Blurry</strong> • <strong style="color: #fbbf24;">${oversizedCount} Heavy</strong>${distortedCount > 0 ? ` • <strong style="color: #c084fc;">${distortedCount} Distorted</strong>` : ''}</span>
         `;
         document.body.appendChild(topBar);
       }
@@ -159,9 +352,15 @@ export class PageScanner {
         withAlt: withAltCount,
         missingAlt: missingAltCount,
         emptyAlt: emptyAltCount,
+        retinaHdCount,
+        standardResCount,
+        blurryCount,
+        oversizedCount,
+        distortedCount,
+        missingDimensionsCount,
         images: auditData,
       };
-    }, this.config.annotateAlt ?? true);
+    }, opts);
   }
 
   private async autoScroll(page: Page): Promise<void> {
@@ -220,13 +419,26 @@ export class PageScanner {
           'a.btn, a.button, a[class*="btn"], a[class*="button"], a[role="button"], button, a.elementor-button, .cta a, a[class*="cta"]'
         );
         const seen = new Set<string>();
-        const list: { text: string; href: string; type: string; selector: string }[] = [];
+        const list: {
+          text: string;
+          href: string;
+          type: string;
+          selector: string;
+          classes: string;
+          rel: string;
+          followStatus: 'DOFOLLOW' | 'NOFOLLOW';
+        }[] = [];
 
         candidates.forEach((el) => {
           let href = el.getAttribute('href') || (el as HTMLAnchorElement).href || '';
           let text = (el.innerText || el.textContent || '').trim().replace(/\s+/g, ' ');
           if (!text) text = el.getAttribute('aria-label') || el.getAttribute('title') || '';
           const tagName = el.tagName.toLowerCase();
+          const classes = el.className || '';
+          const rel = (el.getAttribute('rel') || '').trim();
+          const isNofollow = /\bnofollow\b/i.test(rel);
+          const followStatus: 'DOFOLLOW' | 'NOFOLLOW' = isNofollow ? 'NOFOLLOW' : 'DOFOLLOW';
+
           if (!href && tagName === 'button') {
             const form = el.closest('form');
             href = form?.action || 'javascript:void(0)';
@@ -238,7 +450,10 @@ export class PageScanner {
               text,
               href,
               type: tagName,
-              selector: `${tagName}.${el.className.split(' ').slice(0, 2).join('.')}`,
+              selector: `${tagName}.${classes.split(' ').slice(0, 2).join('.')}`,
+              classes,
+              rel,
+              followStatus,
             });
           }
         });
@@ -257,11 +472,18 @@ export class PageScanner {
             const key = `${text}|${a.href}`;
             if (!seen.has(key)) {
               seen.add(key);
+              const rel = (a.getAttribute('rel') || '').trim();
+              const isNofollow = /\bnofollow\b/i.test(rel);
+              const followStatus: 'DOFOLLOW' | 'NOFOLLOW' = isNofollow ? 'NOFOLLOW' : 'DOFOLLOW';
+
               list.push({
                 text,
                 href: a.href,
                 type: 'a (styled)',
                 selector: `a.${a.className.split(' ').slice(0, 2).join('.')}`,
+                classes: a.className,
+                rel,
+                followStatus,
               });
             }
           }
@@ -273,22 +495,38 @@ export class PageScanner {
       const ctas: any[] = [];
       let brokenCount = 0;
       let validCount = 0;
+      let dofollowCount = 0;
+      let nofollowCount = 0;
+      let success200Count = 0;
+      let redirect200Count = 0;
+      let failed404Count = 0;
 
       for (const item of rawCtas) {
+        if (item.followStatus === 'NOFOLLOW') {
+          nofollowCount++;
+        } else {
+          dofollowCount++;
+        }
+
+        const trimmedHref = item.href.trim();
         if (
-          item.href.startsWith('tel:') ||
-          item.href.startsWith('mailto:') ||
-          item.href.startsWith('javascript:') ||
-          item.href.startsWith('#')
+          trimmedHref.startsWith('tel:') ||
+          trimmedHref.startsWith('mailto:') ||
+          trimmedHref.startsWith('javascript:') ||
+          trimmedHref.startsWith('#')
         ) {
           validCount++;
+          success200Count++;
           ctas.push({
             text: item.text,
             href: item.href,
             type: item.type,
             selector: item.selector,
+            rel: item.rel,
+            followStatus: item.followStatus,
             status: 200,
             statusText: 'Action Protocol',
+            condition: '200 success (Action Protocol)',
             is404: false,
           });
           continue;
@@ -296,14 +534,64 @@ export class PageScanner {
 
         try {
           const resolved = new URL(item.href, targetUrl).toString();
-          const res = await context.request.get(resolved, { timeout: 10000 });
-          const status = res.status();
-          const is404 = status === 404;
 
-          if (is404 || status >= 400) {
-            brokenCount++;
-          } else {
+          // Check initial response with maxRedirects: 0 to catch redirects
+          const initRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 0 });
+          const initStatus = initRes.status();
+          const initStatusText = initRes.statusText();
+
+          let finalStatus = initStatus;
+          let finalStatusText = initStatusText;
+          let isRedirect = false;
+          let redirectUrl: string | undefined = undefined;
+          let condition = '';
+          let is404 = false;
+
+          if (initStatus >= 300 && initStatus < 400) {
+            isRedirect = true;
+            const finalRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 5 });
+            finalStatus = finalRes.status();
+            finalStatusText = finalRes.statusText();
+            redirectUrl = finalRes.url();
+            is404 = finalStatus === 404;
+
+            if (finalStatus === 200) {
+              condition = '200 redirection';
+              redirect200Count++;
+              validCount++;
+            } else if (finalStatus === 404) {
+              condition = '404 gagal';
+              failed404Count++;
+              brokenCount++;
+            } else if (finalStatus >= 400) {
+              condition = `${initStatus} redirect -> ${finalStatus} gagal`;
+              brokenCount++;
+            } else {
+              condition = `${initStatus} redirect -> ${finalStatus}`;
+              validCount++;
+            }
+          } else if (initStatus === 200) {
+            finalStatus = 200;
+            condition = '200 success';
+            success200Count++;
             validCount++;
+            is404 = false;
+          } else if (initStatus === 404) {
+            finalStatus = 404;
+            condition = '404 gagal';
+            failed404Count++;
+            brokenCount++;
+            is404 = true;
+          } else if (initStatus >= 400) {
+            finalStatus = initStatus;
+            condition = `HTTP ${initStatus} gagal`;
+            brokenCount++;
+            is404 = false;
+          } else {
+            finalStatus = initStatus;
+            condition = `HTTP ${initStatus}`;
+            validCount++;
+            is404 = false;
           }
 
           ctas.push({
@@ -311,8 +599,14 @@ export class PageScanner {
             href: resolved,
             type: item.type,
             selector: item.selector,
-            status,
-            statusText: res.statusText(),
+            rel: item.rel,
+            followStatus: item.followStatus,
+            status: finalStatus,
+            initialStatus: initStatus,
+            statusText: finalStatusText,
+            isRedirect,
+            redirectUrl,
+            condition,
             is404,
           });
         } catch (err: any) {
@@ -322,6 +616,9 @@ export class PageScanner {
             href: item.href,
             type: item.type,
             selector: item.selector,
+            rel: item.rel,
+            followStatus: item.followStatus,
+            condition: `Gagal (${err.message})`,
             is404: false,
             error: err.message,
           });
@@ -332,10 +629,25 @@ export class PageScanner {
         totalCTAs: ctas.length,
         validCTAs: validCount,
         brokenCTAs: brokenCount,
+        dofollowCTAs: dofollowCount,
+        nofollowCTAs: nofollowCount,
+        success200CTAs: success200Count,
+        redirect200CTAs: redirect200Count,
+        failed404CTAs: failed404Count,
         ctas,
       };
     } catch {
-      return { totalCTAs: 0, validCTAs: 0, brokenCTAs: 0, ctas: [] };
+      return {
+        totalCTAs: 0,
+        validCTAs: 0,
+        brokenCTAs: 0,
+        dofollowCTAs: 0,
+        nofollowCTAs: 0,
+        success200CTAs: 0,
+        redirect200CTAs: 0,
+        failed404CTAs: 0,
+        ctas: [],
+      };
     }
   }
 
@@ -385,6 +697,8 @@ export class PageScanner {
       }
     });
 
+    let initialHttpStatus = 0;
+
     page.on('pageerror', (error) => {
       unhandledJSErrors.push(error.stack || error.message || String(error));
     });
@@ -392,8 +706,8 @@ export class PageScanner {
     page.on('response', (response) => {
       const status = response.status();
       const req = response.request();
-      if (req.isNavigationRequest() && req.url() === targetUrl) {
-        mainHttpStatus = status;
+      if (req.isNavigationRequest() && !initialHttpStatus) {
+        initialHttpStatus = status;
       }
       if (status >= 400) {
         failedRequests.push({
@@ -420,6 +734,12 @@ export class PageScanner {
       withAlt: 0,
       missingAlt: 0,
       emptyAlt: 0,
+      retinaHdCount: 0,
+      standardResCount: 0,
+      blurryCount: 0,
+      oversizedCount: 0,
+      distortedCount: 0,
+      missingDimensionsCount: 0,
       images: [],
     };
     let pageCtaAudit: any = {
@@ -445,8 +765,10 @@ export class PageScanner {
         });
       }
 
-      if (navResponse && !mainHttpStatus) {
+      if (navResponse) {
         mainHttpStatus = navResponse.status();
+      } else if (initialHttpStatus) {
+        mainHttpStatus = initialHttpStatus;
       }
 
       // Wait a moment for dynamic rendering

@@ -7,6 +7,20 @@ export interface ViewportConfig {
   name: string;
 }
 
+export interface SitemapGroup {
+  name: string;
+  url: string;
+  urls: string[];
+}
+
+export interface SitemapGroupSummary {
+  name: string;
+  url: string;
+  count: number;
+}
+
+export type ImageQualityStatus = 'HD' | 'SD' | 'BLURRY' | 'OVERSIZED' | 'DISTORTED' | 'VECTOR';
+
 export interface CrawlConfig {
   baseUrl: string;
   siteName: string;
@@ -21,6 +35,14 @@ export interface CrawlConfig {
   customUrls?: string[];
   headless: boolean;
   annotateAlt?: boolean;
+  checkImageQuality?: boolean;
+  minHdRatio?: number;
+  maxOversizedRatio?: number;
+  maxImageSizeKb?: number;
+  sitemapUrl?: string;
+  selectedSubSitemap?: string;
+  sitemapGroups?: SitemapGroupSummary[];
+  crawlMode?: 'sitemap-all' | 'sitemap-partial' | 'sitemap-group' | 'bfs' | 'custom-urls';
 }
 
 export interface ImageInfo {
@@ -30,15 +52,33 @@ export interface ImageInfo {
   isEmptyAlt: boolean;
   width: number;
   height: number;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  densityRatio?: number;
+  effectiveDprRatio?: number;
+  aspectRatioMismatch?: boolean;
+  aspectRatioDeltaPct?: number;
+  fileSizeBytes?: number;
+  fileFormat?: string;
+  hasExplicitDimensions?: boolean;
+  qualityStatus?: ImageQualityStatus;
   elementId?: string;
   className?: string;
 }
+
+export type ImageQualityAuditItem = ImageInfo;
 
 export interface ImageAudit {
   totalImages: number;
   withAlt: number;
   missingAlt: number;
   emptyAlt: number;
+  retinaHdCount?: number;
+  standardResCount?: number;
+  blurryCount?: number;
+  oversizedCount?: number;
+  distortedCount?: number;
+  missingDimensionsCount?: number;
   images: ImageInfo[];
 }
 
@@ -47,8 +87,14 @@ export interface CTAInfo {
   href: string;
   type: string;
   selector?: string;
+  rel?: string;
+  followStatus?: 'DOFOLLOW' | 'NOFOLLOW';
   status?: number;
+  initialStatus?: number;
   statusText?: string;
+  isRedirect?: boolean;
+  redirectUrl?: string;
+  condition?: string;
   is404: boolean;
   error?: string;
 }
@@ -57,6 +103,11 @@ export interface CTAAudit {
   totalCTAs: number;
   validCTAs: number;
   brokenCTAs: number;
+  dofollowCTAs?: number;
+  nofollowCTAs?: number;
+  success200CTAs?: number;
+  redirect200CTAs?: number;
+  failed404CTAs?: number;
   ctas: CTAInfo[];
 }
 
@@ -109,8 +160,19 @@ export interface QAAuditSummary {
   totalImages: number;
   totalMissingAlt: number;
   totalEmptyAlt: number;
+  totalRetinaHdImages?: number;
+  totalStandardResImages?: number;
+  totalBlurryImages?: number;
+  totalOversizedImages?: number;
+  totalDistortedImages?: number;
   totalCTAs: number;
   totalBrokenCTAs: number;
+  sitemapFound?: boolean;
+  sitemapUrl?: string;
+  totalSitemapUrls?: number;
+  selectedSubSitemap?: string;
+  sitemapGroups?: SitemapGroupSummary[];
+  crawlMode?: 'sitemap-all' | 'sitemap-partial' | 'sitemap-group' | 'bfs' | 'custom-urls';
   results: PageScanResult[];
 }
 

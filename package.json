@@ -12,6 +12,9 @@
     "report": "tsx src/open-report.ts",
     "clean": "tsx src/clean.ts",
     "clear": "tsx src/clean.ts",
+    "check:cta": "tsx src/check-cta.ts",
+    "check:images": "tsx src/check-images.ts",
+    "check:sitemap": "tsx src/sitemap.ts",
     "test": "playwright test"
   },
   "keywords": ["playwright", "qa", "crawler", "gemini", "ai-qa", "visual-regression", "typescript"],

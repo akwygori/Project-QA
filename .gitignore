@@ -5,3 +5,5 @@ output/*
 !output/.gitkeep
 test-results/
 playwright-report/
+Update *.md
+Update*.md
