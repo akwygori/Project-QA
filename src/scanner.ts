@@ -9,6 +9,16 @@ export class PageScanner {
   private config: CrawlConfig;
   private screenshotsDir: string;
   private logsDir: string;
+  private ctaStatusCache = new Map<string, Promise<{
+    status: number;
+    initialStatus: number;
+    statusText: string;
+    isRedirect: boolean;
+    redirectUrl?: string;
+    condition: string;
+    is404: boolean;
+    error?: string;
+  }>>();
 
   constructor(config: CrawlConfig) {
     this.config = config;
@@ -412,9 +422,173 @@ export class PageScanner {
     }
   }
 
+  private async checkSingleCta(
+    context: BrowserContext,
+    targetUrl: string,
+    rawHref: string
+  ): Promise<{
+    resolvedHref: string;
+    status: number;
+    initialStatus: number;
+    statusText: string;
+    isRedirect: boolean;
+    redirectUrl?: string;
+    condition: string;
+    is404: boolean;
+    error?: string;
+  }> {
+    const trimmedHref = (rawHref || '').trim();
+    if (
+      trimmedHref.startsWith('tel:') ||
+      trimmedHref.startsWith('mailto:') ||
+      trimmedHref.startsWith('javascript:') ||
+      trimmedHref.startsWith('#')
+    ) {
+      return {
+        resolvedHref: rawHref,
+        status: 200,
+        initialStatus: 200,
+        statusText: 'Action Protocol',
+        isRedirect: false,
+        condition: '200 success (Action Protocol)',
+        is404: false,
+      };
+    }
+
+    let resolved = rawHref;
+    try {
+      resolved = new URL(rawHref, targetUrl).toString();
+    } catch {
+      return {
+        resolvedHref: rawHref,
+        status: 0,
+        initialStatus: 0,
+        statusText: 'Invalid URL',
+        isRedirect: false,
+        condition: 'URL tidak valid',
+        is404: true,
+        error: 'Invalid URL format',
+      };
+    }
+
+    if (this.ctaStatusCache.has(resolved)) {
+      const cached = await this.ctaStatusCache.get(resolved)!;
+      return { ...cached, resolvedHref: resolved };
+    }
+
+    const checkPromise = (async () => {
+      try {
+        let initRes;
+        try {
+          initRes = await context.request.fetch(resolved, {
+            method: 'HEAD',
+            timeout: 10000,
+            maxRedirects: 0,
+          });
+          if (initRes.status() === 405 || initRes.status() === 501) {
+            initRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 0 });
+          }
+        } catch {
+          initRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 0 });
+        }
+
+        const initStatus = initRes.status();
+        const initStatusText = initRes.statusText();
+
+        let finalStatus = initStatus;
+        let finalStatusText = initStatusText;
+        let isRedirect = false;
+        let redirectUrl: string | undefined = undefined;
+        let condition = '';
+        let is404 = false;
+
+        const isSocialOrProtected = /instagram\.com|facebook\.com|linkedin\.com|twitter\.com|x\.com|tiktok\.com|pinterest\.com/i.test(resolved);
+        if (isSocialOrProtected && (initStatus === 403 || initStatus === 999)) {
+          return {
+            status: 200,
+            initialStatus: initStatus,
+            statusText: 'Protected Platform OK',
+            isRedirect: false,
+            condition: '200 success (Protected External Platform)',
+            is404: false,
+          };
+        }
+
+        if (initStatus >= 300 && initStatus < 400) {
+          isRedirect = true;
+          try {
+            const finalRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 5 });
+            finalStatus = finalRes.status();
+            finalStatusText = finalRes.statusText();
+            redirectUrl = finalRes.url();
+            is404 = finalStatus === 404;
+
+            if (isSocialOrProtected && (finalStatus === 403 || finalStatus === 999)) {
+              condition = '200 redirection (Protected External Platform)';
+              is404 = false;
+            } else if (finalStatus === 200) {
+              condition = '200 redirection';
+            } else if (finalStatus === 404) {
+              condition = '404 gagal';
+            } else if (finalStatus >= 400) {
+              condition = `${initStatus} redirect -> ${finalStatus} gagal`;
+            } else {
+              condition = `${initStatus} redirect -> ${finalStatus}`;
+            }
+          } catch (redErr: any) {
+            condition = `${initStatus} redirect error: ${redErr.message}`;
+          }
+        } else if (initStatus === 200) {
+          finalStatus = 200;
+          condition = '200 success';
+          is404 = false;
+        } else if (initStatus === 404) {
+          finalStatus = 404;
+          condition = '404 gagal';
+          is404 = true;
+        } else if (initStatus >= 400) {
+          finalStatus = initStatus;
+          condition = `HTTP ${initStatus} gagal`;
+          is404 = false;
+        } else {
+          finalStatus = initStatus;
+          condition = `HTTP ${initStatus}`;
+          is404 = false;
+        }
+
+        return {
+          status: finalStatus,
+          initialStatus: initStatus,
+          statusText: finalStatusText,
+          isRedirect,
+          redirectUrl,
+          condition,
+          is404,
+        };
+      } catch (err: any) {
+        return {
+          status: 0,
+          initialStatus: 0,
+          statusText: 'Error',
+          isRedirect: false,
+          condition: `Gagal (${err.message})`,
+          is404: false,
+          error: err.message,
+        };
+      }
+    })();
+
+    this.ctaStatusCache.set(resolved, checkPromise);
+    const result = await checkPromise;
+    return { ...result, resolvedHref: resolved };
+  }
+
   private async auditPageCTAs(page: Page, context: BrowserContext, targetUrl: string): Promise<any> {
     try {
       const rawCtas = await page.evaluate(() => {
+        if (typeof (window as any).__name === 'undefined') {
+          (window as any).__name = (fn: any) => fn;
+        }
         const candidates = document.querySelectorAll<HTMLElement>(
           'a.btn, a.button, a[class*="btn"], a[class*="button"], a[role="button"], button, a.elementor-button, .cta a, a[class*="cta"]'
         );
@@ -501,129 +675,58 @@ export class PageScanner {
       let redirect200Count = 0;
       let failed404Count = 0;
 
-      for (const item of rawCtas) {
-        if (item.followStatus === 'NOFOLLOW') {
-          nofollowCount++;
-        } else {
-          dofollowCount++;
-        }
+      // Check CTAs concurrently in chunks of 6 to maximize speed and minimize latency
+      const concurrencyChunkSize = 6;
+      for (let i = 0; i < rawCtas.length; i += concurrencyChunkSize) {
+        const chunk = rawCtas.slice(i, i + concurrencyChunkSize);
+        const resolvedChunk = await Promise.all(
+          chunk.map(async (item) => {
+            const check = await this.checkSingleCta(context, targetUrl, item.href);
+            return { item, check };
+          })
+        );
 
-        const trimmedHref = item.href.trim();
-        if (
-          trimmedHref.startsWith('tel:') ||
-          trimmedHref.startsWith('mailto:') ||
-          trimmedHref.startsWith('javascript:') ||
-          trimmedHref.startsWith('#')
-        ) {
-          validCount++;
-          success200Count++;
-          ctas.push({
-            text: item.text,
-            href: item.href,
-            type: item.type,
-            selector: item.selector,
-            rel: item.rel,
-            followStatus: item.followStatus,
-            status: 200,
-            statusText: 'Action Protocol',
-            condition: '200 success (Action Protocol)',
-            is404: false,
-          });
-          continue;
-        }
+        for (const { item, check } of resolvedChunk) {
+          if (item.followStatus === 'NOFOLLOW') {
+            nofollowCount++;
+          } else {
+            dofollowCount++;
+          }
 
-        try {
-          const resolved = new URL(item.href, targetUrl).toString();
-
-          // Check initial response with maxRedirects: 0 to catch redirects
-          const initRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 0 });
-          const initStatus = initRes.status();
-          const initStatusText = initRes.statusText();
-
-          let finalStatus = initStatus;
-          let finalStatusText = initStatusText;
-          let isRedirect = false;
-          let redirectUrl: string | undefined = undefined;
-          let condition = '';
-          let is404 = false;
-
-          if (initStatus >= 300 && initStatus < 400) {
-            isRedirect = true;
-            const finalRes = await context.request.get(resolved, { timeout: 10000, maxRedirects: 5 });
-            finalStatus = finalRes.status();
-            finalStatusText = finalRes.statusText();
-            redirectUrl = finalRes.url();
-            is404 = finalStatus === 404;
-
-            if (finalStatus === 200) {
-              condition = '200 redirection';
-              redirect200Count++;
-              validCount++;
-            } else if (finalStatus === 404) {
-              condition = '404 gagal';
-              failed404Count++;
-              brokenCount++;
-            } else if (finalStatus >= 400) {
-              condition = `${initStatus} redirect -> ${finalStatus} gagal`;
-              brokenCount++;
-            } else {
-              condition = `${initStatus} redirect -> ${finalStatus}`;
-              validCount++;
-            }
-          } else if (initStatus === 200) {
-            finalStatus = 200;
-            condition = '200 success';
-            success200Count++;
-            validCount++;
-            is404 = false;
-          } else if (initStatus === 404) {
-            finalStatus = 404;
-            condition = '404 gagal';
+          if (check.is404) {
             failed404Count++;
             brokenCount++;
-            is404 = true;
-          } else if (initStatus >= 400) {
-            finalStatus = initStatus;
-            condition = `HTTP ${initStatus} gagal`;
+          } else if (check.status >= 400 || check.error) {
             brokenCount++;
-            is404 = false;
-          } else {
-            finalStatus = initStatus;
-            condition = `HTTP ${initStatus}`;
+          } else if (check.condition.startsWith('200 redirection') || check.isRedirect) {
+            redirect200Count++;
             validCount++;
-            is404 = false;
+          } else if (check.status === 200) {
+            success200Count++;
+            validCount++;
+          } else {
+            validCount++;
           }
 
           ctas.push({
             text: item.text,
-            href: resolved,
+            href: check.resolvedHref,
             type: item.type,
             selector: item.selector,
             rel: item.rel,
             followStatus: item.followStatus,
-            status: finalStatus,
-            initialStatus: initStatus,
-            statusText: finalStatusText,
-            isRedirect,
-            redirectUrl,
-            condition,
-            is404,
-          });
-        } catch (err: any) {
-          brokenCount++;
-          ctas.push({
-            text: item.text,
-            href: item.href,
-            type: item.type,
-            selector: item.selector,
-            rel: item.rel,
-            followStatus: item.followStatus,
-            condition: `Gagal (${err.message})`,
-            is404: false,
-            error: err.message,
+            status: check.status,
+            initialStatus: check.initialStatus,
+            statusText: check.statusText,
+            isRedirect: check.isRedirect,
+            redirectUrl: check.redirectUrl,
+            condition: check.condition,
+            is404: check.is404,
+            error: check.error,
           });
         }
       }
+
 
       return {
         totalCTAs: ctas.length,
@@ -651,7 +754,56 @@ export class PageScanner {
     }
   }
 
-  async scanPage(targetUrl: string): Promise<PageScanResult> {
+  async scanPage(targetUrl: string, workerPrefix: string = ''): Promise<PageScanResult> {
+    if (!this.browser) {
+      throw new Error('Browser is not initialized. Call init() first.');
+    }
+
+    const maxRetries = this.config.maxRetries ?? 2;
+    let attempt = 0;
+
+    while (attempt <= maxRetries) {
+      attempt++;
+      try {
+        const result = await this.executeScan(targetUrl);
+
+        const isRateLimited = result.httpStatus === 429 || result.httpStatus === 503;
+        const isFatalNavError =
+          !result.isSuccess &&
+          result.unhandledJSErrors.some((e) =>
+            e.includes('Navigation failed') && (e.includes('timeout') || e.includes('net::ERR_'))
+          );
+
+        if ((isRateLimited || isFatalNavError) && attempt <= maxRetries) {
+          const delayMs = Math.pow(2, attempt) * 1000;
+          const reason = isRateLimited ? `HTTP ${result.httpStatus} Rate Limited` : 'Navigation Timeout / Network Failure';
+          const prefix = workerPrefix ? `${workerPrefix} ` : '';
+          console.warn(
+            `${prefix}⚠️  [Retry ${attempt}/${maxRetries}] ${targetUrl} terdeteksi ${reason}. Menunggu ${delayMs / 1000}s sebelum mencoba ulang...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          continue;
+        }
+
+        return result;
+      } catch (err: any) {
+        if (attempt <= maxRetries) {
+          const delayMs = Math.pow(2, attempt) * 1000;
+          const prefix = workerPrefix ? `${workerPrefix} ` : '';
+          console.warn(
+            `${prefix}⚠️  [Retry ${attempt}/${maxRetries}] ${targetUrl} error: ${err.message}. Menunggu ${delayMs / 1000}s...`
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    throw new Error(`Max retries exceeded for ${targetUrl}`);
+  }
+
+  private async executeScan(targetUrl: string): Promise<PageScanResult> {
     if (!this.browser) {
       throw new Error('Browser is not initialized. Call init() first.');
     }
@@ -669,21 +821,31 @@ export class PageScanner {
 
     const startTime = Date.now();
 
-    // 1. Desktop Scan & Full Error Capturing
-    const desktopVp = this.config.viewports.find((v) => v.name === 'desktop') || {
-      width: 1920,
-      height: 1080,
+    const hasDesktop = this.config.viewports.some((v) => v.name === 'desktop');
+    const hasMobile = this.config.viewports.some((v) => v.name === 'mobile');
+    const primaryIsDesktop = hasDesktop || !hasMobile;
+
+    const primaryVp = primaryIsDesktop
+      ? this.config.viewports.find((v) => v.name === 'desktop') || { width: 1920, height: 1080 }
+      : this.config.viewports.find((v) => v.name === 'mobile') || { width: 375, height: 844, deviceScaleFactor: 2 };
+
+    const primaryContextOptions: any = {
+      viewport: { width: primaryVp.width, height: primaryVp.height },
+      userAgent: primaryIsDesktop
+        ? 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 PlaywrightQABot/1.0'
+        : 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1 PlaywrightQABot/1.0',
     };
 
-    const context: BrowserContext = await this.browser.newContext({
-      viewport: { width: desktopVp.width, height: desktopVp.height },
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 PlaywrightQABot/1.0',
-    });
+    if (!primaryIsDesktop) {
+      primaryContextOptions.isMobile = true;
+      primaryContextOptions.hasTouch = true;
+      primaryContextOptions.deviceScaleFactor = primaryVp.deviceScaleFactor || 2;
+    }
 
+    const context: BrowserContext = await this.browser.newContext(primaryContextOptions);
     const page: Page = await context.newPage();
 
-    // Setup listeners
+    // Setup listeners on primary page
     page.on('console', (msg) => {
       const type = msg.type();
       const text = msg.text();
@@ -785,16 +947,25 @@ export class PageScanner {
       // Audit CTA Buttons destination status
       pageCtaAudit = await this.auditPageCTAs(page, context, targetUrl);
 
-      // Desktop Screenshot (will contain visual alt annotations)
-      const desktopFilename = `${pageName}-desktop.png`;
-      const desktopFilePath = path.join(this.screenshotsDir, desktopFilename);
-      screenshotPaths.desktop = await this.captureSafeScreenshot(page, desktopFilePath);
+      // Primary Screenshot
+      if (primaryIsDesktop) {
+        const desktopFilename = `${pageName}-desktop.png`;
+        const desktopFilePath = path.join(this.screenshotsDir, desktopFilename);
+        screenshotPaths.desktop = await this.captureSafeScreenshot(page, desktopFilePath);
+      } else {
+        const mobileFilename = `${pageName}-mobile.png`;
+        const mobileFilePath = path.join(this.screenshotsDir, mobileFilename);
+        screenshotPaths.mobile = await this.captureSafeScreenshot(page, mobileFilePath);
+      }
 
       // Extract internal links for crawler
       discoveredLinks = await extractLinksFromPage(page, this.config.baseUrl, this.config.excludePatterns);
 
       // Extract key textual content for typo & grammar checking
       pageTextSnippets = await page.evaluate(() => {
+        if (typeof (window as any).__name === 'undefined') {
+          (window as any).__name = (fn: any) => fn;
+        }
         const sel = 'h1, h2, h3, h4, h5, h6, p, li, button, .cta, a.btn, [role="button"], [role="heading"]';
         const elements = Array.from(document.querySelectorAll(sel));
         const texts = elements
@@ -808,9 +979,13 @@ export class PageScanner {
       await context.close().catch(() => {});
     }
 
-    // 2. Mobile Scan & Screenshot (if configured)
-    const mobileVp = this.config.viewports.find((v) => v.name === 'mobile');
-    if (mobileVp && this.browser) {
+    // Secondary Mobile Scan & Screenshot (only if BOTH desktop and mobile are configured)
+    if (hasDesktop && hasMobile && this.browser) {
+      const mobileVp = this.config.viewports.find((v) => v.name === 'mobile') || {
+        width: 375,
+        height: 844,
+        deviceScaleFactor: 2,
+      };
       const mobileContext = await this.browser.newContext({
         viewport: { width: mobileVp.width, height: mobileVp.height },
         isMobile: true,

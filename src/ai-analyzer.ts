@@ -294,71 +294,71 @@ Jangan tambahkan pembuka atau penutup obrolan, hanya kembalikan baris tabel mark
   } else {
     let noteIndex = 1;
     if (httpErrorPages.length > 0) {
-      reportLines.push(`### 🚫 \${noteIndex++}. Halaman Error / Tidak Ditemukan (HTTP 4xx / 5xx)`);
+      reportLines.push(`### 🚫 ${noteIndex++}. Halaman Error / Tidak Ditemukan (HTTP 4xx / 5xx)`);
       for (const p of httpErrorPages) {
-        reportLines.push(`- Halaman **\${p.pageName}** (\`\${p.url}\`) -> Status HTTP: \`\${p.httpStatus}\``);
+        reportLines.push(`- Halaman **${p.pageName}** (\`${p.url}\`) -> Status HTTP: \`${p.httpStatus}\``);
       }
       reportLines.push(``);
     }
     if (summary.totalBrokenCTAs > 0) {
-      reportLines.push(`### 🚨 \${noteIndex++}. Tombol CTA / Tautan Rusak (Broken Link 404 / Error)`);
+      reportLines.push(`### 🚨 ${noteIndex++}. Tombol CTA / Tautan Rusak (Broken Link 404 / Error)`);
       for (const r of summary.results) {
         if (r.ctaAudit && r.ctaAudit.brokenCTAs > 0) {
           const broken = r.ctaAudit.ctas.filter((c) => c.is404 || (c.status && c.status >= 400) || c.error);
           for (const b of broken) {
-            const redir = b.redirectUrl ? ` (redirect ke: \`\${b.redirectUrl}\`)` : '';
-            reportLines.push(`- Halaman **\${r.pageName}** (\`\${r.url}\`): Button **"\${b.text}"** -> target: \`\${b.href}\`\${redir} [Status: \${b.status || 'ERR'}]`);
+            const redir = b.redirectUrl ? ` (redirect ke: \`${b.redirectUrl}\`)` : '';
+            reportLines.push(`- Halaman **${r.pageName}** (\`${r.url}\`): Button **"${b.text}"** -> target: \`${b.href}\`${redir} [Status: ${b.status || 'ERR'}]`);
           }
         }
       }
       reportLines.push(``);
     }
     if (summary.totalBlurryImages && summary.totalBlurryImages > 0) {
-      reportLines.push(`### 🔴 \${noteIndex++}. Gambar Pecah / Buram (Blurry / Upscaled Images - Urgent Visual Fix)`);
-      reportLines.push(`Ditemukan **\${summary.totalBlurryImages} gambar** yang resolusi aslinya lebih kecil daripada ukuran tampilannya di layar (Kerapatan < 1.0x). Gambar mengalami interpolasi paksa sehingga terlihat buram/pecah bagi pengguna:`);
+      reportLines.push(`### 🔴 ${noteIndex++}. Gambar Pecah / Buram (Blurry / Upscaled Images - Urgent Visual Fix)`);
+      reportLines.push(`Ditemukan **${summary.totalBlurryImages} gambar** yang resolusi aslinya lebih kecil daripada ukuran tampilannya di layar (Kerapatan < 1.0x). Gambar mengalami interpolasi paksa sehingga terlihat buram/pecah bagi pengguna:`);
       for (const r of summary.results) {
         if (r.imageAudit && r.imageAudit.blurryCount && r.imageAudit.blurryCount > 0) {
           const blurries = r.imageAudit.images.filter((img) => img.qualityStatus === 'BLURRY');
           for (const b of blurries) {
-            reportLines.push(`- Halaman **\${r.pageName}**: \`\${b.src.slice(0, 140)}\` (Asli: \`\${b.naturalWidth || 0}px\` ➔ Tampil: \`\${b.width}px\`, Kerapatan: \`\${b.densityRatio}x\`)`);
+            reportLines.push(`- Halaman **${r.pageName}**: \`${b.src.slice(0, 140)}\` (Asli: \`${b.naturalWidth || 0}px\` ➔ Tampil: \`${b.width}px\`, Kerapatan: \`${b.densityRatio}x\`)`);
           }
         }
       }
       reportLines.push(``);
     }
     if (summary.totalDistortedImages && summary.totalDistortedImages > 0) {
-      reportLines.push(`### 📐 \${noteIndex++}. Gambar Terdistorsi / Gepeng (Aspect Ratio Mismatch)`);
-      reportLines.push(`Ditemukan **\${summary.totalDistortedImages} gambar** dengan rasio aspek asli yang tidak sesuai dengan dimensi CSS tampilan (deviasi rasio > 8%). Gambar terlihat peyot/gepeng:`);
+      reportLines.push(`### 📐 ${noteIndex++}. Gambar Terdistorsi / Gepeng (Aspect Ratio Mismatch)`);
+      reportLines.push(`Ditemukan **${summary.totalDistortedImages} gambar** dengan rasio aspek asli yang tidak sesuai dengan dimensi CSS tampilan (deviasi rasio > 8%). Gambar terlihat peyot/gepeng:`);
       for (const r of summary.results) {
         if (r.imageAudit && r.imageAudit.distortedCount && r.imageAudit.distortedCount > 0) {
           const dists = r.imageAudit.images.filter((img) => img.qualityStatus === 'DISTORTED');
           for (const d of dists) {
-            reportLines.push(`- Halaman **\${r.pageName}**: \`\${d.src.slice(0, 140)}\` (Asli: \${d.naturalWidth}x\${d.naturalHeight} vs Tampil: \${d.width}x\${d.height}, Beda: \`\${d.aspectRatioDeltaPct}%\`)`);
+            reportLines.push(`- Halaman **${r.pageName}**: \`${d.src.slice(0, 140)}\` (Asli: ${d.naturalWidth}x${d.naturalHeight} vs Tampil: ${d.width}x${d.height}, Beda: \`${d.aspectRatioDeltaPct}%\`)`);
           }
         }
       }
       reportLines.push(``);
     }
     if (summary.totalOversizedImages && summary.totalOversizedImages > 0) {
-      reportLines.push(`### ⚠️ \${noteIndex++}. Aset Gambar Terlalu Berat / Oversized (Performance Optimization)`);
-      reportLines.push(`Ditemukan **\${summary.totalOversizedImages} gambar** yang resolusinya berlebih (> 3.5x dari yang dibutuhkan) atau berbobot file besar (> 500 KB):`);
+      reportLines.push(`### ⚠️ ${noteIndex++}. Aset Gambar Terlalu Berat / Oversized (Performance Optimization)`);
+      reportLines.push(`Ditemukan **${summary.totalOversizedImages} gambar** yang resolusinya berlebih (> 3.5x dari yang dibutuhkan) atau berbobot file besar (> 500 KB):`);
       for (const r of summary.results) {
         if (r.imageAudit && r.imageAudit.oversizedCount && r.imageAudit.oversizedCount > 0) {
           const heavies = r.imageAudit.images.filter((img) => img.qualityStatus === 'OVERSIZED');
           for (const h of heavies) {
-            const sz = h.fileSizeBytes ? ` [\${(h.fileSizeBytes / 1024).toFixed(1)} KB]` : '';
-            reportLines.push(`- Halaman **\${r.pageName}**: \`\${h.src.slice(0, 140)}\` (Asli: \${h.naturalWidth}x\${h.naturalHeight} vs Tampil: \${h.width}x\${h.height}, Rasio: \`\${h.densityRatio}x\`)\${sz}`);
+            const sz = h.fileSizeBytes ? ` [${(h.fileSizeBytes / 1024).toFixed(1)} KB]` : '';
+            reportLines.push(`- Halaman **${r.pageName}**: \`${h.src.slice(0, 140)}\` (Asli: ${h.naturalWidth}x${h.naturalHeight} vs Tampil: ${h.width}x${h.height}, Rasio: \`${h.densityRatio}x\`)${sz}`);
           }
         }
       }
       reportLines.push(``);
     }
     if (summary.totalNetworkErrors > 0) {
-      reportLines.push(`### 🛑 \${noteIndex++}. Aset / Permintaan Jaringan yang Gagal (Asset Hilang / 404 / 5xx)`);
+      reportLines.push(`### 🛑 ${noteIndex++}. Aset / Permintaan Jaringan yang Gagal (Asset Hilang / 404 / 5xx)`);
       for (const r of summary.results) {
         if (r.failedRequests.length > 0) {
-          reportLines.push(`- Halaman **\${r.pageName}** (\`\${r.url}\`):`);
-          r.failedRequests.forEach((req) => reportLines.push(`  * [Status \${req.status || 'ERR'}] Tipe \`\${req.resourceType || 'aset'}\`: \`\${req.url.slice(0, 140)}\``));
+          reportLines.push(`- Halaman **${r.pageName}** (\`${r.url}\`):`);
+          r.failedRequests.forEach((req) => reportLines.push(`  * [Status ${req.status || 'ERR'}] Tipe \`${req.resourceType || 'aset'}\`: \`${req.url.slice(0, 140)}\``));
         }
       }
       reportLines.push(``);

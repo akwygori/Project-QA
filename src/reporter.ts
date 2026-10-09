@@ -117,18 +117,25 @@ export class QAReporter {
       selectedSubSitemap: this.config.selectedSubSitemap,
       sitemapGroups: this.config.sitemapGroups,
       crawlMode: this.config.crawlMode,
+      concurrency: this.config.concurrency,
+      viewportMode: this.config.viewportMode,
       results: this.results,
     };
   }
 
-  saveAllReports(): {
+  saveAllReports(durationSec?: number): {
     jsonPath: string;
     markdownPath: string;
     aiPromptPath: string;
     htmlReportPath: string;
+    csvPath: string;
   } {
     const summary = this.generateSummary();
+    if (durationSec !== undefined) {
+      summary.durationSec = durationSec;
+    }
     const outputDir = this.config.outputDir;
+    fs.mkdirSync(outputDir, { recursive: true });
 
     // 1. summary.json
     const jsonPath = path.join(outputDir, 'summary.json');
@@ -146,7 +153,144 @@ export class QAReporter {
     const htmlReportPath = path.join(outputDir, 'index.html');
     fs.writeFileSync(htmlReportPath, this.generateHtmlDashboard(summary), 'utf-8');
 
-    return { jsonPath, markdownPath, aiPromptPath, htmlReportPath };
+    // 5. issues.csv (Jira / Excel / Sheets importable format)
+    const csvPath = path.join(outputDir, 'issues.csv');
+    fs.writeFileSync(csvPath, this.generateIssuesCsv(summary), 'utf-8');
+
+    return { jsonPath, markdownPath, aiPromptPath, htmlReportPath, csvPath };
+  }
+
+  private generateIssuesCsv(summary: QAAuditSummary): string {
+    const rows: string[][] = [
+      ['Page Name', 'Page URL', 'Issue Category', 'Severity', 'Description / Detail', 'Asset / Target URL', 'HTTP Status']
+    ];
+
+    const escapeCsv = (val: string | number | undefined) => {
+      if (val === undefined || val === null) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    for (const page of summary.results) {
+      // 1. Page HTTP Error
+      if (page.httpStatus >= 400) {
+        rows.push([
+          page.pageName,
+          page.url,
+          'Page HTTP Error',
+          'High',
+          `Halaman mengembalikan status HTTP ${page.httpStatus}`,
+          page.url,
+          String(page.httpStatus),
+        ]);
+      }
+
+      // 2. Broken CTAs
+      if (page.ctaAudit && page.ctaAudit.ctas) {
+        for (const cta of page.ctaAudit.ctas) {
+          if (cta.is404 || (cta.status && cta.status >= 400) || cta.error) {
+            rows.push([
+              page.pageName,
+              page.url,
+              'Broken CTA / Link',
+              'High',
+              `Tombol/link "${cta.text}" gagal diarahkan (${cta.condition})`,
+              cta.href,
+              String(cta.status || 'ERR'),
+            ]);
+          }
+        }
+      }
+
+      // 3. Image Audits
+      if (page.imageAudit && page.imageAudit.images) {
+        for (const img of page.imageAudit.images) {
+          if (!img.hasAlt) {
+            rows.push([
+              page.pageName,
+              page.url,
+              'Missing Alt Text',
+              'Medium',
+              `Gambar tidak memiliki atribut alt (${img.width}x${img.height}px)`,
+              img.src,
+              '-',
+            ]);
+          }
+          if (img.qualityStatus === 'BLURRY') {
+            rows.push([
+              page.pageName,
+              page.url,
+              'Blurry Image',
+              'High',
+              `Resolusi asli (${img.naturalWidth || 0}px) lebih kecil dari wadah tampilan (${img.width}px). Density ratio: ${img.densityRatio}x`,
+              img.src,
+              '-',
+            ]);
+          }
+          if (img.qualityStatus === 'DISTORTED') {
+            rows.push([
+              page.pageName,
+              page.url,
+              'Distorted Image',
+              'Medium',
+              `Rasio aspek tidak proporsional (deviasi ${img.aspectRatioDeltaPct}%)`,
+              img.src,
+              '-',
+            ]);
+          }
+          if (img.qualityStatus === 'OVERSIZED') {
+            rows.push([
+              page.pageName,
+              page.url,
+              'Oversized Image',
+              'Low',
+              `Gambar terlalu besar atau berat (${img.fileSizeBytes ? (img.fileSizeBytes / 1024).toFixed(1) + ' KB' : 'density > 3.5x'})`,
+              img.src,
+              '-',
+            ]);
+          }
+        }
+      }
+
+      // 4. Console Errors & Uncaught JS
+      for (const jsErr of page.unhandledJSErrors) {
+        rows.push([
+          page.pageName,
+          page.url,
+          'Uncaught JS Error',
+          'High',
+          jsErr.split('\n')[0].slice(0, 200),
+          '-',
+          '-',
+        ]);
+      }
+      for (const conErr of page.consoleErrors) {
+        rows.push([
+          page.pageName,
+          page.url,
+          'Console Error',
+          'Medium',
+          conErr.text.split('\n')[0].slice(0, 200),
+          conErr.location || '-',
+          '-',
+        ]);
+      }
+
+      // 5. Failed Network Requests
+      for (const netErr of page.failedRequests) {
+        rows.push([
+          page.pageName,
+          page.url,
+          'Failed Network Request',
+          'High',
+          `Permintaan aset gagal: ${netErr.failureReason || netErr.statusText || 'Error'}`,
+          netErr.url,
+          String(netErr.status || 'ERR'),
+        ]);
+      }
+    }
+
+    return rows.map((r) => r.map(escapeCsv).join(',')).join('\r\n');
   }
 
   private generateMarkdown(summary: QAAuditSummary): string {
@@ -159,6 +303,7 @@ export class QAReporter {
         ? [`- **Sub-Sitemaps Terdeteksi**: ${summary.sitemapGroups.map((g) => `\`${g.name}\` (${g.count} pgs)`).join(', ')}`]
         : []),
       `- **Scanned At**: ${new Date(summary.scannedAt).toLocaleString()}`,
+      `- **Execution**: \`${summary.concurrency || 1} worker paralel\` | Viewports: \`${summary.viewportMode || 'all'}\`${summary.durationSec ? ` | Durasi: \`${summary.durationSec}s\`` : ''}`,
       `- **Total Pages Scanned**: ${summary.totalPages}`,
       `- **Pages with Errors / Warnings**: ${summary.pagesWithErrors}`,
       `- **Total Console / JS Errors**: ${summary.totalConsoleErrors}`,
@@ -1001,7 +1146,7 @@ export class QAReporter {
     <header>
       <div class="brand">
         <h1><span>QA AutoAudit</span> Dashboard</h1>
-        <p>Target: <strong>${summary.siteName}</strong> &bull; Scanned at ${new Date(summary.scannedAt).toLocaleString()}${summary.sitemapUrl ? ` &bull; 🗺️ Sitemap: <a href="${summary.sitemapUrl}" target="_blank" style="color: #818cf8; text-decoration: underline;">${summary.sitemapUrl}</a> (${summary.crawlMode || 'sitemap'})` : ''}</p>
+        <p>Target: <strong>${summary.siteName}</strong> &bull; Scanned at ${new Date(summary.scannedAt).toLocaleString()}${summary.sitemapUrl ? ` &bull; 🗺️ Sitemap: <a href="${summary.sitemapUrl}" target="_blank" style="color: #818cf8; text-decoration: underline;">${summary.sitemapUrl}</a> (${summary.crawlMode || 'sitemap'})` : ''} &bull; ⚡ <strong>${summary.concurrency || 1} Workers</strong> &bull; 📱 Viewport: <strong>${summary.viewportMode || 'all'}</strong>${summary.durationSec ? ` &bull; ⏱️ <strong>${summary.durationSec}s</strong>` : ''}</p>
       </div>
       <div>
         <a href="ai-prompt.md" target="_blank" class="btn">📋 View AI Prompt Bundle</a>

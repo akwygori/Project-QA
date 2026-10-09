@@ -55,10 +55,12 @@ export function urlToPageName(urlStr: string): string {
       pathPart = 'home';
     }
     if (parsed.search) {
-      const searchPart = parsed.search.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 30);
-      pathPart += `-${searchPart}`;
+      const searchPart = parsed.search.replace(/^\?/, '').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 30);
+      if (searchPart) {
+        pathPart += `-${searchPart}`;
+      }
     }
-    return pathPart;
+    return pathPart.replace(/-+/g, '-').replace(/^-|-$/g, '') || 'home';
   } catch {
     return 'page';
   }

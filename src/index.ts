@@ -14,10 +14,14 @@ program
   .name('playwright-qa-crawler')
   .description('Automated Playwright QA Crawler, Visual & Functional Auditor, and AI Analyzer')
   .option('-u, --url <url>', 'Base URL website target (misal: https://example.com)')
-  .option('-n, --name <name>', 'Nama website / project (misal: Limestone, Wink)')
+  .option('-n, --name <name>', 'Nama website / project (misal: Project Alpha, Storefront)')
   .option('-m, --max-pages <number>', 'Maksimal jumlah halaman yang di-crawl', (val) => parseInt(val, 10))
   .option('-d, --max-depth <number>', 'Maksimal kedalaman crawl (depth)', (val) => parseInt(val, 10))
-  .option('--desktop-only', 'Hanya ambil screenshot Desktop (tanpa Mobile)')
+  .option('-c, --concurrency <number>', 'Jumlah worker crawling paralel (default: 3)', (val) => parseInt(val, 10))
+  .option('--viewport <mode>', 'Pilih viewport untuk diaudit: all, desktop, atau mobile (default: all)')
+  .option('--desktop-only', 'Hanya ambil screenshot dan audit Desktop (tanpa Mobile)')
+  .option('--mobile-only', 'Hanya ambil screenshot dan audit Mobile (tanpa Desktop)')
+  .option('--retries <number>', 'Batas maksimal retry saat request gagal/timeout/429 (default: 2)', (val) => parseInt(val, 10))
   .option('--headful', 'Buka browser secara tampak (non-headless)')
   .option('--no-alt-overlay', 'Nonaktifkan visual badge overlay alt text pada screenshot')
   .option('--no-hd-check', 'Nonaktifkan audit mutu resolusi grafik gambar HD')
@@ -53,6 +57,11 @@ async function main() {
   if (options.name) overrides.siteName = options.name;
   if (options.maxPages) overrides.maxPages = options.maxPages;
   if (options.maxDepth) overrides.maxDepth = options.maxDepth;
+  if (options.concurrency) overrides.concurrency = options.concurrency;
+  if (options.viewport) overrides.viewportMode = options.viewport;
+  if (options.desktopOnly) overrides.viewportMode = 'desktop';
+  if (options.mobileOnly) overrides.viewportMode = 'mobile';
+  if (options.retries !== undefined) overrides.maxRetries = options.retries;
   if (options.headful) overrides.headless = false;
   if (options.urls) overrides.customUrls = options.urls;
   if (options.altOverlay === false) overrides.annotateAlt = false;
@@ -65,25 +74,26 @@ async function main() {
 
   const config = getDefaultConfig(overrides);
 
-  if (options.desktopOnly) {
-    config.viewports = config.viewports.filter((v) => v.name === 'desktop');
-  }
-
   console.log(`\n======================================================`);
   console.log(`🚀 [QA Automation] Memulai Playwright Crawler & Auditor`);
   console.log(`======================================================`);
   console.log(`🌐 Target Website : ${config.siteName} (${config.baseUrl})`);
   console.log(`📄 Max Pages      : ${config.maxPages}`);
+  console.log(`⚡ Concurrency   : ${config.concurrency} worker paralel`);
+  console.log(`📱 Viewports      : ${config.viewportMode} (${config.viewports.map((v) => v.name).join(', ')})`);
+  console.log(`🔄 Max Retries   : ${config.maxRetries}x`);
   console.log(`🖼️ Alt Text Audit : ${config.annotateAlt ? 'Aktif (Visual Overlay pada Screenshot)' : 'Nonaktif'}`);
   console.log(`✨ Image HD Audit : ${config.checkImageQuality ? `Aktif (Min ${config.minHdRatio}x, Max Size ${config.maxImageSizeKb}KB)` : 'Nonaktif'}`);
-  console.log(`📱 Viewports      : ${config.viewports.map((v) => v.name).join(', ')}`);
   console.log(`📁 Output Dir     : ${config.outputDir}`);
   console.log(`======================================================\n`);
 
   // Step 1: Deteksi Sitemap Otomatis & Konfirmasi Interaktif Pengguna
   if (config.customUrls && config.customUrls.length > 0) {
     config.crawlMode = 'custom-urls';
-    console.log(`📌 [URL Manual] Menggunakan daftar ${config.customUrls.length} URL manual. Deteksi sitemap dilewati.\n`);
+    if (!options.maxPages) {
+      config.maxPages = Math.max(config.maxPages, config.customUrls.length);
+    }
+    console.log(`📌 [URL Manual] Menggunakan daftar ${config.customUrls.length} URL manual (maxPages: ${config.maxPages}). Deteksi sitemap dilewati.\n`);
   } else if (options.skipSitemap) {
     config.crawlMode = 'bfs';
     console.log(`⏩ [--skip-sitemap] Deteksi sitemap dilewati. Menggunakan crawling dinamis HTML (BFS).\n`);
@@ -255,79 +265,143 @@ async function main() {
       queue.push({ url: config.baseUrl, depth: 0 });
     }
 
-    let scannedCount = 0;
+    const concurrency = Math.min(config.concurrency || 3, config.maxPages);
+    let completedCount = 0;
+    let claimedCount = 0;
+    let activeWorkers = 0;
+    let isDone = false;
+    const waitResolvers: (() => void)[] = [];
 
-    while (queue.length > 0 && scannedCount < config.maxPages) {
-      const current = queue.shift()!;
-      if (visited.has(current.url)) {
-        continue;
+    const notifyWorkers = () => {
+      while (waitResolvers.length > 0) {
+        const resolve = waitResolvers.shift();
+        if (resolve) resolve();
       }
+    };
 
-      visited.add(current.url);
-      scannedCount++;
+    const crawlStartTime = Date.now();
 
-      console.log(`🔍 [${scannedCount}/${config.maxPages}] Scanning: ${current.url} (Depth: ${current.depth})`);
+    const workerLoop = async (workerId: number) => {
+      const workerTag = concurrency > 1 ? `[W${workerId}]` : '';
 
-      const result = await scanner.scanPage(current.url);
-      reporter.addResult(result);
+      while (!isDone) {
+        let current: { url: string; depth: number } | null = null;
 
-      const errCount = result.consoleErrors.length + result.unhandledJSErrors.length + result.failedRequests.length;
-      let altBadgeStr = '🟢 Alt OK';
-      if (result.imageAudit) {
-        if (result.imageAudit.missingAlt > 0 && result.imageAudit.emptyAlt > 0) {
-          altBadgeStr = `🔴 ${result.imageAudit.missingAlt} Missing, 🟡 ${result.imageAudit.emptyAlt} Empty`;
-        } else if (result.imageAudit.missingAlt > 0) {
-          altBadgeStr = `🔴 ${result.imageAudit.missingAlt} Missing Alt`;
-        } else if (result.imageAudit.emptyAlt > 0) {
-          altBadgeStr = `🟡 ${result.imageAudit.emptyAlt} Empty Alt`;
-        }
-      }
-      const imgInfo = result.imageAudit ? ` | 🖼️ ${result.imageAudit.totalImages} imgs (${altBadgeStr})` : '';
-      const ctaInfo = result.ctaAudit
-        ? ` | 🎯 ${result.ctaAudit.totalCTAs} CTAs (${result.ctaAudit.brokenCTAs > 0 ? `🔴 ${result.ctaAudit.brokenCTAs} Broken/404` : `🟢 All OK`})`
-        : '';
-
-      const hasAltWarning = result.imageAudit && (result.imageAudit.missingAlt > 0 || result.imageAudit.emptyAlt > 0);
-
-      if (
-        errCount > 0 ||
-        result.httpStatus >= 400 ||
-        hasAltWarning ||
-        (result.ctaAudit && result.ctaAudit.brokenCTAs > 0)
-      ) {
-        const uncaughtStr = result.unhandledJSErrors.length > 0 ? ` | 💥 ${result.unhandledJSErrors.length} Uncaught JS` : '';
-        console.log(`   ⚠️  HTTP ${result.httpStatus} | ${result.consoleErrors.length} Console Err${uncaughtStr} | ${result.failedRequests.length} Net Err${imgInfo}${ctaInfo}`);
-      } else {
-        console.log(`   ✅ HTTP ${result.httpStatus} | Bersih tanpa error console${imgInfo}${ctaInfo}`);
-      }
-
-      // Add newly discovered links if within depth limit
-      if (!config.customUrls && current.depth < config.maxDepth) {
-        for (const link of result.discoveredLinks) {
-          if (!visited.has(link) && !queue.some((q) => q.url === link)) {
-            queue.push({ url: link, depth: current.depth + 1 });
+        // Atomically claim the next unvisited URL
+        while (queue.length > 0) {
+          const candidate = queue.shift()!;
+          if (!visited.has(candidate.url)) {
+            visited.add(candidate.url);
+            current = candidate;
+            break;
           }
         }
-      }
 
-      // Polite delay between pages
-      if (config.delayBetweenPagesMs > 0 && queue.length > 0 && scannedCount < config.maxPages) {
-        await new Promise((resolve) => setTimeout(resolve, config.delayBetweenPagesMs));
+        if (!current) {
+          if (activeWorkers === 0 || claimedCount >= config.maxPages) {
+            isDone = true;
+            notifyWorkers();
+            break;
+          }
+          // Idle wait for new links from active workers or completion
+          await new Promise<void>((resolve) => {
+            waitResolvers.push(resolve);
+          });
+          continue;
+        }
+
+        claimedCount++;
+        activeWorkers++;
+        const taskNumber = claimedCount;
+        const prefix = workerTag ? `${workerTag} ` : '';
+
+        console.log(`${prefix}🔍 [${taskNumber}/${config.maxPages}] Scanning: ${current.url} (Depth: ${current.depth})`);
+
+        try {
+          const result = await scanner.scanPage(current.url, workerTag);
+          reporter.addResult(result);
+          completedCount++;
+
+          const errCount = result.consoleErrors.length + result.unhandledJSErrors.length + result.failedRequests.length;
+          let altBadgeStr = '🟢 Alt OK';
+          if (result.imageAudit) {
+            if (result.imageAudit.missingAlt > 0 && result.imageAudit.emptyAlt > 0) {
+              altBadgeStr = `🔴 ${result.imageAudit.missingAlt} Missing, 🟡 ${result.imageAudit.emptyAlt} Empty`;
+            } else if (result.imageAudit.missingAlt > 0) {
+              altBadgeStr = `🔴 ${result.imageAudit.missingAlt} Missing Alt`;
+            } else if (result.imageAudit.emptyAlt > 0) {
+              altBadgeStr = `🟡 ${result.imageAudit.emptyAlt} Empty Alt`;
+            }
+          }
+          const imgInfo = result.imageAudit ? ` | 🖼️ ${result.imageAudit.totalImages} imgs (${altBadgeStr})` : '';
+          const ctaInfo = result.ctaAudit
+            ? ` | 🎯 ${result.ctaAudit.totalCTAs} CTAs (${result.ctaAudit.brokenCTAs > 0 ? `🔴 ${result.ctaAudit.brokenCTAs} Broken/404` : `🟢 All OK`})`
+            : '';
+
+          const hasAltWarning = result.imageAudit && (result.imageAudit.missingAlt > 0 || result.imageAudit.emptyAlt > 0);
+
+          if (
+            errCount > 0 ||
+            result.httpStatus >= 400 ||
+            hasAltWarning ||
+            (result.ctaAudit && result.ctaAudit.brokenCTAs > 0)
+          ) {
+            const uncaughtStr = result.unhandledJSErrors.length > 0 ? ` | 💥 ${result.unhandledJSErrors.length} Uncaught JS` : '';
+            console.log(`   ${prefix}⚠️  HTTP ${result.httpStatus} | ${result.consoleErrors.length} Console Err${uncaughtStr} | ${result.failedRequests.length} Net Err${imgInfo}${ctaInfo}`);
+          } else {
+            console.log(`   ${prefix}✅ HTTP ${result.httpStatus} | Bersih tanpa error console${imgInfo}${ctaInfo}`);
+          }
+
+          // Add newly discovered links if within depth limit and limit not reached
+          if (!config.customUrls && current.depth < config.maxDepth && claimedCount < config.maxPages) {
+            let addedNew = false;
+            for (const link of result.discoveredLinks) {
+              if (!visited.has(link) && !queue.some((q) => q.url === link)) {
+                queue.push({ url: link, depth: current.depth + 1 });
+                addedNew = true;
+              }
+            }
+            if (addedNew) {
+              notifyWorkers();
+            }
+          }
+        } catch (err: any) {
+          console.error(`   ${prefix}❌ Error scanning ${current.url}:`, err.message);
+        } finally {
+          activeWorkers--;
+          if (claimedCount >= config.maxPages || (activeWorkers === 0 && queue.length === 0)) {
+            isDone = true;
+          }
+          notifyWorkers();
+        }
+
+        // Polite delay between pages per worker
+        if (config.delayBetweenPagesMs > 0 && !isDone && queue.length > 0) {
+          await new Promise((resolve) => setTimeout(resolve, config.delayBetweenPagesMs));
+        }
       }
-    }
+    };
+
+    const workerPromises = Array.from({ length: concurrency }, (_, i) => workerLoop(i + 1));
+    await Promise.all(workerPromises);
+
+    const totalDurationSec = ((Date.now() - crawlStartTime) / 1000).toFixed(1);
+    console.log(`\n⚡ Selesai crawling ${completedCount} halaman dalam ${totalDurationSec}s (${concurrency} worker paralel).`);
 
     await scanner.close();
 
     console.log(`\n💾 Menyimpan laporan QA...`);
-    const reports = reporter.saveAllReports();
+    const reports = reporter.saveAllReports(parseFloat(totalDurationSec));
 
     console.log(`\n======================================================`);
     console.log(`✅ Crawling & Auditing Selesai!`);
     console.log(`======================================================`);
-    console.log(`📊 Total Halaman Di-scan : ${scannedCount}`);
+    console.log(`📊 Total Halaman Di-scan : ${completedCount}`);
+    console.log(`⏱️ Waktu Eksekusi Total  : ${totalDurationSec}s (${concurrency} worker)`);
     console.log(`📸 Screenshots           : ${config.outputDir}/screenshots/`);
     console.log(`📜 Error Logs (JSON)     : ${config.outputDir}/logs/`);
     console.log(`📑 Summary Markdown      : ${reports.markdownPath}`);
+    console.log(`📊 Issues CSV (Jira/Excel): ${reports.csvPath}`);
     console.log(`🤖 AI Prompt Siap Pakai  : ${reports.aiPromptPath}`);
     console.log(`🌐 Visual Dashboard      : ${reports.htmlReportPath}`);
     console.log(`======================================================\n`);

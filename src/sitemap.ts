@@ -1,5 +1,6 @@
 import { normalizeUrl } from './crawler.js';
 import { SitemapGroup } from './types.js';
+import { ensureAbsoluteUrl } from './config.js';
 
 export interface SitemapDetectionResult {
   found: boolean;
@@ -79,7 +80,8 @@ export async function detectSitemap(
   customSitemapUrl?: string
 ): Promise<SitemapDetectionResult> {
   try {
-    const parsedBase = new URL(baseUrl);
+    const safeBaseUrl = ensureAbsoluteUrl(baseUrl);
+    const parsedBase = new URL(safeBaseUrl);
     const origin = parsedBase.origin;
 
     // 1. Check custom sitemap first if provided
@@ -206,7 +208,8 @@ export async function detectSitemap(
 if (process.argv[1] && /sitemap\.(ts|js)$/i.test(process.argv[1].replace(/\\/g, '/'))) {
   const urlIdx = process.argv.findIndex((a) => a === '-u' || a === '--url' || a === '-t' || a === '--target');
   const targetArg = urlIdx !== -1 && process.argv[urlIdx + 1] ? process.argv[urlIdx + 1] : process.argv.slice(2).find((a) => !a.startsWith('-'));
-  const target = targetArg || process.env.TARGET_URL || 'https://example.com';
+  const rawTarget = targetArg || process.env.TARGET_URL || 'https://example.com';
+  const target = ensureAbsoluteUrl(rawTarget);
   console.log(`🔍 Mendeteksi sitemap untuk: ${target}...`);
   detectSitemap(target).then((res) => {
     if (res.found) {

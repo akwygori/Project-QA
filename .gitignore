@@ -1,9 +1,33 @@
+# Dependencies
 node_modules/
+
+# Production build artifacts
 dist/
+
+# Environment variables & secrets (CRITICAL)
 .env
+.env.*
+!.env.example
+
+# Output artifacts & crawling results
 output/*
 !output/.gitkeep
+
+# Playwright test reports & traces
 test-results/
 playwright-report/
+blob-report/
+
+# Daily update recap notes & logs
 Update *.md
 Update*.md
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

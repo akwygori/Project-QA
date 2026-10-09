@@ -43,6 +43,9 @@ export interface CrawlConfig {
   selectedSubSitemap?: string;
   sitemapGroups?: SitemapGroupSummary[];
   crawlMode?: 'sitemap-all' | 'sitemap-partial' | 'sitemap-group' | 'bfs' | 'custom-urls';
+  concurrency?: number;
+  viewportMode?: 'all' | 'desktop' | 'mobile';
+  maxRetries?: number;
 }
 
 export interface ImageInfo {
@@ -173,6 +176,9 @@ export interface QAAuditSummary {
   selectedSubSitemap?: string;
   sitemapGroups?: SitemapGroupSummary[];
   crawlMode?: 'sitemap-all' | 'sitemap-partial' | 'sitemap-group' | 'bfs' | 'custom-urls';
+  concurrency?: number;
+  viewportMode?: string;
+  durationSec?: number;
   results: PageScanResult[];
 }
 

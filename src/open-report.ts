@@ -17,7 +17,7 @@ function findReportPath(): string | null {
 
   const outputBase = path.resolve(process.cwd(), 'output');
 
-  // 1. Specified via CLI argument (e.g. npm run report -- smilesbydocford.com or -t smilesbydocford.com)
+  // 1. Specified via CLI argument (e.g. npm run report -- example.com or -t example.com)
   if (argTarget) {
     const folderName = argTarget.includes('://') ? urlToOutputDirName(argTarget) : argTarget;
     const directPath = path.join(outputBase, folderName, 'index.html');

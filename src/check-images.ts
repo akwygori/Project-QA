@@ -1,6 +1,7 @@
-import { chromium } from 'playwright';
+import { chromium, Browser } from 'playwright';
 import dotenv from 'dotenv';
 import { ImageQualityAuditItem } from './types.js';
+import { ensureAbsoluteUrl } from './config.js';
 
 dotenv.config();
 
@@ -12,34 +13,38 @@ function formatBytes(bytes?: number): string {
   return `${(kb / 1024).toFixed(2)} MB`;
 }
 
-async function checkImages() {
-  const urlIdx = process.argv.findIndex((a) => a === '-u' || a === '--url' || a === '-t' || a === '--target');
-  const targetArg = urlIdx !== -1 && process.argv[urlIdx + 1] ? process.argv[urlIdx + 1] : process.argv.slice(2).find((a) => !a.startsWith('-'));
-  const rawUrl = targetArg || process.env.TARGET_URL || 'https://example.com';
-  const targetUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+interface ImageAuditOptions {
+  minHdRatio: number;
+  maxOversizedRatio: number;
+  maxImageSizeKb: number;
+}
 
-  const minHdArg = process.argv.findIndex((a) => a === '--min-hd');
-  const minHdRatio = minHdArg !== -1 && process.argv[minHdArg + 1] ? parseFloat(process.argv[minHdArg + 1]) : parseFloat(process.env.IMAGE_MIN_HD_RATIO || '1.9');
-
-  const maxOverArg = process.argv.findIndex((a) => a === '--max-oversized' || a === '--max-oversized-ratio');
-  const maxOversizedRatio = maxOverArg !== -1 && process.argv[maxOverArg + 1] ? parseFloat(process.argv[maxOverArg + 1]) : parseFloat(process.env.IMAGE_MAX_OVERSIZED_RATIO || '3.5');
-
-  const maxSizeArg = process.argv.findIndex((a) => a === '--max-image-size' || a === '--max-size');
-  const maxImageSizeKb = maxSizeArg !== -1 && process.argv[maxSizeArg + 1] ? parseInt(process.argv[maxSizeArg + 1], 10) : parseInt(process.env.IMAGE_MAX_SIZE_KB || '500', 10);
+async function auditSinglePageImages(
+  browser: Browser,
+  targetUrl: string,
+  options: ImageAuditOptions,
+  pageIndex?: number,
+  totalUrls?: number
+) {
+  const prefix = totalUrls && totalUrls > 1 ? `[Page ${pageIndex}/${totalUrls}] ` : '';
 
   console.log(`\n======================================================`);
-  console.log(`🔍 [Image Quality & HD Auditor] Standar Enterprise`);
+  console.log(`🔍 [Image Quality & HD Auditor] ${prefix}Memeriksa:`);
   console.log(`🌐 Target URL        : ${targetUrl}`);
-  console.log(`📐 Ambang Batas HD   : Min ${minHdRatio}x (Retina-ready)`);
-  console.log(`⚠️ Ambang Oversized  : Max ${maxOversizedRatio}x atau > ${maxImageSizeKb} KB`);
+  console.log(`📐 Ambang Batas HD   : Min ${options.minHdRatio}x (Retina-ready)`);
+  console.log(`⚠️ Ambang Oversized  : Max ${options.maxOversizedRatio}x atau > ${options.maxImageSizeKb} KB`);
   console.log(`======================================================\n`);
 
-  const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({
     viewport: { width: 1920, height: 1080 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36 PlaywrightQABot/1.0',
+    extraHTTPHeaders: {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
   });
+
   const page = await context.newPage();
 
   try {
@@ -68,8 +73,7 @@ async function checkImages() {
       });
     });
 
-    const auditResults = await page.evaluate((options) => {
-      // Polyfill esbuild __name helper if injected into browser context
+    const auditResults = await page.evaluate((opts) => {
       if (typeof (window as any).__name === 'undefined') {
         (window as any).__name = (fn: any) => fn;
       }
@@ -109,6 +113,10 @@ async function checkImages() {
 
         const densityRatio = renderedWidth > 0 && naturalWidth > 0
           ? Math.round(((naturalWidth / renderedWidth) + Number.EPSILON) * 100) / 100
+          : 1;
+
+        const effectiveDprRatio = renderedWidth > 0 && naturalWidth > 0
+          ? Math.round(((naturalWidth / (renderedWidth * dpr)) + Number.EPSILON) * 100) / 100
           : 1;
 
         let aspectRatioMismatch = false;
@@ -165,10 +173,10 @@ async function checkImages() {
         } else if (densityRatio < 1.0) {
           qualityStatus = 'BLURRY';
           blurryCount++;
-        } else if (densityRatio > options.maxOversizedRatio || (fileSizeBytes && fileSizeBytes > options.maxImageSizeKb * 1024)) {
+        } else if (densityRatio > opts.maxOversizedRatio || (fileSizeBytes && fileSizeBytes > opts.maxImageSizeKb * 1024)) {
           qualityStatus = 'OVERSIZED';
           oversizedCount++;
-        } else if (densityRatio >= options.minHdRatio) {
+        } else if (densityRatio >= opts.minHdRatio) {
           qualityStatus = 'HD';
           retinaHdCount++;
         } else {
@@ -186,6 +194,7 @@ async function checkImages() {
           naturalWidth,
           naturalHeight,
           densityRatio,
+          effectiveDprRatio,
           aspectRatioMismatch,
           aspectRatioDeltaPct,
           fileSizeBytes,
@@ -206,16 +215,16 @@ async function checkImages() {
         distortedCount,
         items,
       };
-    }, { minHdRatio, maxOversizedRatio, maxImageSizeKb });
+    }, options);
 
     console.log(`\n======================================================`);
-    console.log(`📊 RINGKASAN HASIL AUDIT GRAFIK GAMBAR:`);
+    console.log(`📊 RINGKASAN HASIL AUDIT GRAFIK GAMBAR: ${targetUrl}`);
     console.log(`======================================================`);
     console.log(`🖼️  Total Gambar Ditemukan : ${auditResults.totalImages}`);
-    console.log(`✨  CRISP HD (Retina-ready) : ${auditResults.retinaHdCount} (Kerapatan ≥ ${minHdRatio}x)`);
+    console.log(`✨  CRISP HD (Retina-ready) : ${auditResults.retinaHdCount} (Kerapatan ≥ ${options.minHdRatio}x)`);
     console.log(`🟡  Standard Res (SD 1x)    : ${auditResults.standardResCount}`);
     console.log(`🔴  BLURRY / Pecah (Upscale): ${auditResults.blurryCount} (Kerapatan < 1.0x)`);
-    console.log(`⚠️  OVERSIZED (Terlalu Berat): ${auditResults.oversizedCount} (> ${maxOversizedRatio}x atau > ${maxImageSizeKb}KB)`);
+    console.log(`⚠️  OVERSIZED (Terlalu Berat): ${auditResults.oversizedCount} (> ${options.maxOversizedRatio}x atau > ${options.maxImageSizeKb}KB)`);
     if (auditResults.distortedCount > 0) {
       console.log(`📐  DISTORTED (Gepeng/Melar) : ${auditResults.distortedCount} (Deviasi rasio > 8%)`);
     }
@@ -292,11 +301,80 @@ async function checkImages() {
     } else {
       console.log(`✅ SEMUA GAMBAR MEMENUHI STANDAR MUTU HD & ACCESSIBILITY!\n`);
     }
+
+    return auditResults;
   } catch (err: any) {
-    console.error(`❌ Terjadi kesalahan saat memeriksa gambar: ${err.message}`);
+    console.error(`❌ Terjadi kesalahan saat memeriksa gambar pada ${targetUrl}: ${err.message}\n`);
+    return null;
   } finally {
-    await browser.close();
+    await context.close().catch(() => {});
   }
 }
 
-checkImages();
+async function checkImages() {
+  let targetUrls: string[] = [];
+
+  const urlsIdx = process.argv.findIndex((a) => a === '--urls');
+  if (urlsIdx !== -1) {
+    const collected: string[] = [];
+    for (let i = urlsIdx + 1; i < process.argv.length; i++) {
+      if (process.argv[i].startsWith('-')) break;
+      collected.push(process.argv[i]);
+    }
+    if (collected.length > 0) {
+      targetUrls = collected;
+    }
+  }
+
+  if (targetUrls.length === 0) {
+    const urlIdx = process.argv.findIndex((a) => a === '-u' || a === '--url' || a === '-t' || a === '--target');
+    if (urlIdx !== -1 && process.argv[urlIdx + 1]) {
+      targetUrls = [process.argv[urlIdx + 1]];
+    } else {
+      const positional = process.argv.slice(2).filter((a) => !a.startsWith('-') && (a.includes('://') || a.includes('.') || a.includes('localhost')));
+      if (positional.length > 0) {
+        targetUrls = positional;
+      }
+    }
+  }
+
+  if (targetUrls.length === 0) {
+    targetUrls = [process.env.TARGET_URL || 'https://example.com'];
+  }
+
+  targetUrls = targetUrls.map((u) => ensureAbsoluteUrl(u));
+
+  const minHdArg = process.argv.findIndex((a) => a === '--min-hd');
+  const minHdRatio = minHdArg !== -1 && process.argv[minHdArg + 1] ? parseFloat(process.argv[minHdArg + 1]) : parseFloat(process.env.IMAGE_MIN_HD_RATIO || '1.9');
+
+  const maxOverArg = process.argv.findIndex((a) => a === '--max-oversized' || a === '--max-oversized-ratio');
+  const maxOversizedRatio = maxOverArg !== -1 && process.argv[maxOverArg + 1] ? parseFloat(process.argv[maxOverArg + 1]) : parseFloat(process.env.IMAGE_MAX_OVERSIZED_RATIO || '3.5');
+
+  const maxSizeArg = process.argv.findIndex((a) => a === '--max-image-size' || a === '--max-size');
+  const maxImageSizeKb = maxSizeArg !== -1 && process.argv[maxSizeArg + 1] ? parseInt(process.argv[maxSizeArg + 1], 10) : parseInt(process.env.IMAGE_MAX_SIZE_KB || '500', 10);
+
+  const options: ImageAuditOptions = { minHdRatio, maxOversizedRatio, maxImageSizeKb };
+
+  console.log(`\n======================================================`);
+  console.log(`🎯 [Image Quality Auditor Tool] Standar Enterprise`);
+  console.log(`📄 Total Target : ${targetUrls.length} halaman`);
+  targetUrls.forEach((u, i) => console.log(`   [${i + 1}] ${u}`));
+  console.log(`======================================================`);
+
+  let browser: Browser | null = null;
+  try {
+    browser = await chromium.launch({ headless: true });
+
+    for (let idx = 0; idx < targetUrls.length; idx++) {
+      await auditSinglePageImages(browser, targetUrls[idx], options, idx + 1, targetUrls.length);
+    }
+  } catch (err: any) {
+    console.error(`❌ Terjadi kesalahan utama saat memeriksa gambar: ${err.message}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
+  }
+}
+
+checkImages().catch(console.error);

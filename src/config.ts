@@ -76,28 +76,45 @@ export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlCon
   const envAnnotateAlt = process.env.ANNOTATE_ALT ?? process.env.annotate_alt;
   const envCheckQuality = process.env.CHECK_IMAGE_QUALITY ?? process.env.check_image_quality;
 
+  const rawViewportMode = (overrides.viewportMode || process.env.VIEWPORT_MODE || 'all').toLowerCase();
+  const viewportMode: 'all' | 'desktop' | 'mobile' =
+    rawViewportMode === 'desktop' || rawViewportMode === 'mobile' ? rawViewportMode : 'all';
+
+  const defaultViewports = [
+    {
+      name: 'desktop',
+      width: 1920,
+      height: 1080,
+      isMobile: false,
+      deviceScaleFactor: 1,
+    },
+    {
+      name: 'mobile',
+      width: 375,
+      height: 844,
+      isMobile: true,
+      hasTouch: true,
+      deviceScaleFactor: 2,
+    },
+  ];
+
+  let viewports = overrides.viewports || defaultViewports;
+  if (viewportMode === 'desktop') {
+    viewports = viewports.filter((v) => v.name === 'desktop');
+  } else if (viewportMode === 'mobile') {
+    viewports = viewports.filter((v) => v.name === 'mobile');
+  }
+
+  const parsedConcurrency = overrides.concurrency ?? parseNumberEnv(process.env.CONCURRENCY || process.env.CRAWL_CONCURRENCY, 3);
+  const concurrency = parsedConcurrency > 0 ? parsedConcurrency : 1;
+  const maxRetries = overrides.maxRetries ?? parseNumberEnv(process.env.MAX_RETRIES, 2);
+
   return {
     baseUrl: targetUrl,
     siteName,
     maxPages: overrides.maxPages ?? parseNumberEnv(process.env.MAX_PAGES, 15),
     maxDepth: overrides.maxDepth ?? parseNumberEnv(process.env.MAX_DEPTH, 2),
-    viewports: [
-      {
-        name: 'desktop',
-        width: 1920,
-        height: 1080,
-        isMobile: false,
-        deviceScaleFactor: 1,
-      },
-      {
-        name: 'mobile',
-        width: 375,
-        height: 844,
-        isMobile: true,
-        hasTouch: true,
-        deviceScaleFactor: 2,
-      },
-    ],
+    viewports,
     fullPageScreenshot: overrides.fullPageScreenshot ?? true,
     timeoutMs: overrides.timeoutMs ?? parseNumberEnv(process.env.TIMEOUT_MS, 30000),
     delayBetweenPagesMs: overrides.delayBetweenPagesMs ?? parseNumberEnv(process.env.DELAY_MS, 1000),
@@ -121,5 +138,8 @@ export function getDefaultConfig(overrides: Partial<CrawlConfig> = {}): CrawlCon
     maxImageSizeKb: overrides.maxImageSizeKb ?? parseNumberEnv(process.env.IMAGE_MAX_SIZE_KB, 500),
     sitemapUrl: overrides.sitemapUrl || process.env.SITEMAP_URL || undefined,
     crawlMode: overrides.crawlMode,
+    concurrency,
+    viewportMode,
+    maxRetries,
   };
 }

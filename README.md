@@ -8,14 +8,14 @@ Sistem otomatisasi QA end-to-end yang dirancang untuk meng-crawl seluruh halaman
 
 ```
 [1. Dev/Script]                         [2. Crawling & Audit]                 [3. Output Per Target]                [4. AI Analysis]
-Bima/Rico jalankan   ----->  Playwright scan & audit:    ----->       Terbentuk di output/<domain>/: ----->  Di-analyze AI pakai
+QA Engineer jalankan  ----->  Playwright scan & audit:    ----->       Terbentuk di output/<domain>/: ----->  Di-analyze AI pakai
 script Playwright            - Screenshot (Alt Overlay)               - Screenshot (Desktop & Mobile)        Prompt Standard QA:
                              - CTA (DOFOLLOW/Redir/404)               - Console & Network Logs               - Visual & Responsive
                              - Extract Text Content                   - Summary JSON & Markdown              - Alt Text & CTA (404)
                              - Console/Network Errors                 - Interactive HTML Dashboard           - Catat Typo English
 ```
 
-1. **Dev/Script**: Bima/Rico mengeksekusi script Playwright dengan satu perintah sederhana (`npm run crawl`, `npm run check:cta`, `npm run check:sitemap`, atau `npm run qa:all`).
+1. **Dev/Script**: QA Engineer / Developer mengeksekusi script Playwright dengan satu perintah sederhana (`npm run crawl`, `npm run check:cta`, `npm run check:sitemap`, atau `npm run qa:all`).
 2. **Deteksi Sitemap & Crawling Audit Otomatis**:
    - **Auto-Detection Sitemap**: Memeriksa `robots.txt` dan file XML sitemap secara otomatis, lalu meminta konfirmasi kepada QA: crawl semua URL, batasi sesuai `maxPages`, atau gunakan crawling dinamis biasa (BFS).
    - Mengunjungi halaman secara presisi atau rekursif (BFS), melakukan autoscroll untuk memicu lazy-loaded elements.
@@ -23,7 +23,14 @@ script Playwright            - Screenshot (Alt Overlay)               - Screensh
    - **Audit CTA Button & Link**: Menemukan seluruh tombol aksi & buttonbox, menguji status HTTP (`200 success`, `200 redirection`, `404 gagal`), serta mendeteksi status SEO (`DOFOLLOW` / `NOFOLLOW`).
    - **Ekstraksi Teks Konten**: Mengambil cuplikan teks asli (`h1-h6`, `p`, button) untuk audit ejaan/typo yang presisi.
 3. **Output Terstruktur per Target URL**:
-   - Disimpan di folder khusus `output/<nama-domain>/` sehingga hasil scan berbagai website (misal: DocFord, Limestone, Wink) tidak akan saling menimpa.
+   - Disimpan di folder khusus `output/<nama-domain>/` sehingga hasil scan berbagai website tidak akan saling menimpa:
+     * `screenshots/`: Screenshot Desktop & Mobile beresolusi tinggi dengan visual overlay alt text badge.
+     * `logs/`: Detail log per halaman (HTTP status, console, network).
+     * `summary.json`: Ringkasan machine-readable seluruh metrik audit QA.
+     * `qa-summary.md`: Laporan komprehensif metrik QA dalam format Markdown.
+     * `issues.csv`: Rekapitulasi seluruh isu (Broken CTA, Blurry Image, Missing Alt, Console Errors) siap impor ke Jira / Excel / Sheets.
+     * `ai-prompt.md`: Prompt siap pakai untuk AI multimodal (Claude / Gemini / ChatGPT).
+     * `index.html`: Dashboard visual interaktif dengan dark mode & filter pencarian instan.
 4. **AI QA Analysis**:
    - **Opsi A (Otomatis)**: Script `npm run analyze` memanggil Google Gemini API (`gemini-2.0-flash` / `gemini-1.5-flash`) secara multimodal (gambar screenshot + log error + cuplikan teks) menghasilkan `AI_QA_REPORT.md`.
    - **Opsi B (Manual)**: Tim QA menyalin isi `ai-prompt.md` dan mengunggah screenshot ke Claude AI / Gemini / ChatGPT web.
@@ -51,7 +58,7 @@ cp .env.example .env
 Isi konfigurasi pada file `.env`:
 ```env
 # Target Website Configuration
-TARGET_URL=https://smilesbydocford.com
+TARGET_URL=https://example.com
 SITE_NAME=Target Website
 
 # Batas Crawling
@@ -60,8 +67,17 @@ MAX_DEPTH=2
 TIMEOUT_MS=30000
 DELAY_MS=1000
 
-# Browser (true = headless di background, false = buka browser tampak di layar)
+# Browser & Concurrency Settings (true = headless, false = visible browser)
 HEADLESS=true
+CONCURRENCY=3
+VIEWPORT_MODE=all
+MAX_RETRIES=2
+
+# Enterprise Image Quality Audit Settings (Opsional)
+CHECK_IMAGE_QUALITY=true
+IMAGE_MIN_HD_RATIO=1.9
+IMAGE_MAX_OVERSIZED_RATIO=3.5
+IMAGE_MAX_SIZE_KB=500
 
 # Google Gemini API Key (Dapatkan gratis di https://aistudio.google.com/)
 GEMINI_API_KEY=AIzaSy...
@@ -89,6 +105,7 @@ output/*
 | `npm run crawl` | `tsx src/index.ts` | Menjalankan deteksi sitemap otomatis, crawling, screenshot Desktop & Mobile, audit Alt Text, dan audit CTA button. |
 | `npm run qa` | `tsx src/index.ts` | Alias yang sama persis dengan `npm run crawl`. |
 | `npm run check:sitemap` | `tsx src/sitemap.ts` | **Baru**: Mendeteksi dan menginspeksi sitemap (`robots.txt`, XML sitemap index, total URL valid) secara cepat tanpa browser. |
+| `npm run check:images` | `tsx src/check-images.ts` | **Baru**: Menjalankan audit mutu grafik & resolusi gambar HD (Retina, blurry, distorted, oversized) pada single URL instan. |
 | `npm run check:cta` | `tsx src/check-cta.ts` | Menjalankan audit mandiri tombol CTA (DOFOLLOW/NOFOLLOW, 200 success, 200 redirection, 404 gagal). |
 | `npm run report` | `tsx src/open-report.ts` | Membuka Dashboard Laporan Visual Interaktif (`index.html`) langsung di browser default. |
 | `npm run clear` | `tsx src/clean.ts` | Membersihkan cache screenshot, log error, dan file laporan di folder `output/`. |
@@ -118,9 +135,14 @@ Ketika menjalankan crawling melalui NPM dengan argumen kustom, sertakan pemisah 
 | Flag / Opsi CLI | Format Nilai | Nilai Default | Penjelasan & Skenario Debugging |
 | :--- | :--- | :--- | :--- |
 | `-u, --url <url>` | String URL | Nilai dari `.env` | **Ubah Target Cepat:** Menguji website tertentu langsung dari terminal tanpa perlu mengedit file `.env`. |
-| `-n, --name <name>` | String | Nama domain | **Label Project:** Memberikan nama project khusus (misal: `"Limestone"`, `"Wink"`) untuk judul laporan & visual dashboard. |
+| `-n, --name <name>` | String | Nama domain | **Label Project:** Memberikan nama project khusus (misal: `"Project-Alpha"`, `"Storefront"`) untuk judul laporan & visual dashboard. |
 | `-m, --max-pages <num>` | Integer | `15` | **Batas Halaman:** Membatasi jumlah halaman yang di-crawl. Sangat berguna diisi `1` atau `3` untuk verifikasi cepat saat debugging. |
 | `-d, --max-depth <num>` | Integer | `2` | **Batas Kedalaman:** Membatasi seberapa dalam link turunan di-crawl dari root domain (`0` = hanya homepage). |
+| `-c, --concurrency <num>` | Integer | `3` | **Multi-Worker Paralel:** Menjalankan N worker crawler secara bersamaan untuk mempercepat proses crawling hingga 3x lipat. |
+| `--viewport <mode>` | `all \| desktop \| mobile` | `all` | **Seleksi Viewport:** Menentukan viewport yang diaudit (`all` = Desktop & Mobile, `desktop` = hanya Desktop, `mobile` = hanya Mobile). |
+| `--desktop-only` | Flag Boolean | `false` (Dual view) | **Hemat Waktu Debugging:** Hanya mengambil screenshot Desktop (1920x1080) dan melewati scan Mobile, mempercepat proses audit hingga 2x lipat. |
+| `--mobile-only` | Flag Boolean | `false` (Dual view) | **Mobile Saja:** Hanya mengambil screenshot dan audit Mobile (375x844, Touch, DPR 2) dan melewati Desktop. |
+| `--retries <num>` | Integer | `2` | **Toleransi Retry:** Batas pengulangan otomatis saat halaman mengalami rate-limiting (HTTP 429/503) atau timeout jaringan. |
 | `--sitemap <url>` | String URL | `undefined` (Auto-detect) | **Sitemap Kustom:** Menentukan lokasi sitemap XML tertentu secara manual tanpa proses auto-discovery. |
 | `--sub-sitemap <name>` | String | `undefined` | **Filter Sub-Sitemap:** Memilih kelompok sub-sitemap spesifik berdasarkan nama/keyword (misal: `page`, `post`, `service`, `local`). |
 | `--skip-sitemap` | Flag Boolean | `false` | **Bypass Sitemap:** Mengabaikan sitemap dan langsung menjalankan penelusuran tautan HTML standar (BFS dinamis). |
@@ -163,11 +185,11 @@ npm run crawl -- -u https://example.com --no-alt-overlay -m 5
 #### D. Crawling Penuh Website Klien Langsung dari Terminal
 Gunakan saat ingin melakukan full audit pada project website baru:
 ```bash
-# Contoh untuk project Limestone
-npm run crawl -- --url https://limestone.example.com --name "Limestone" --max-pages 20
+# Contoh untuk project Alpha
+npm run crawl -- --url https://alpha.example.com --name "Project Alpha" --max-pages 20
 
-# Contoh untuk project Wink
-npm run crawl -- --url https://wink.example.com --name "Wink" --max-pages 25
+# Contoh untuk project Beta
+npm run crawl -- --url https://beta.example.com --name "Project Beta" --max-pages 25
 ```
 
 #### E. Inspeksi & Deteksi Sitemap Cepat (Tanpa Membuka Browser)
@@ -177,17 +199,17 @@ Gunakan jika Anda hanya ingin mengetahui apakah suatu website memiliki sitemap p
 npm run check:sitemap
 
 # Periksa sitemap website lain secara langsung:
-npm run check:sitemap -- https://birminghamplumbingnearme.com
+npm run check:sitemap -- https://example.com
 ```
 
 #### F. Crawling Berdasarkan Kelompok Sub-Sitemap Tertentu (Misal Hanya Pages / Posts)
 Gunakan jika Anda hanya ingin meng-crawl satu sub-sitemap spesifik tanpa membuang waktu meng-crawl halaman blog atau arsip lainnya:
 ```bash
 # Hanya crawl halaman utama (page-sitemap.xml):
-npm run crawl -- -u https://smilesbydocford.com --sub-sitemap page -m 15
+npm run crawl -- -u https://example.com --sub-sitemap page -m 15
 
 # Hanya crawl artikel blog (post-sitemap.xml):
-npm run crawl -- -u https://smilesbydocford.com --sub-sitemap post -m 10
+npm run crawl -- -u https://example.com --sub-sitemap post -m 10
 ```
 
 #### G. Crawling Seluruh Halaman Sitemap Secara Otomatis (CI/CD Friendly)
@@ -211,7 +233,7 @@ Jika hanya ingin menguji keabsahan tombol CTA, broken link (404), dan status SEO
 npm run check:cta
 
 # Menguji URL halaman tertentu secara langsung:
-npm run check:cta -- https://birminghamplumbingnearme.com/service-areas/
+npm run check:cta -- https://example.com/services/
 ```
 
 ---
@@ -223,7 +245,7 @@ Gunakan saat ingin menguji ketajaman visual seluruh gambar di suatu halaman (mem
 npm run check:images
 
 # Menguji URL halaman tertentu secara langsung:
-npm run check:images -- https://smilesbydocford.com/smile-gallery/porcelain-veneers-case-36/
+npm run check:images -- https://example.com/gallery/case-study-1/
 ```
 
 ---
@@ -284,7 +306,7 @@ Setiap website yang di-crawl memiliki folder output tersendiri di dalam direktor
 
 ```
 output/
-├── smilesbydocford.com/
+├── example.com/
 │   ├── screenshots/      # Screenshot Desktop & Mobile dengan visual overlay
 │   ├── logs/             # JSON log per halaman (error log, alt text lengkap, CTA audit, text snippets)
 │   ├── summary.json      # Rekap data hasil crawl & audit
@@ -292,7 +314,7 @@ output/
 │   ├── ai-prompt.md      # Prompt QA siap pakai untuk AI (termasuk instruksi Notes Khusus)
 │   ├── index.html        # Interactive QA Visual Dashboard
 │   └── AI_QA_REPORT.md   # Laporan evaluasi AI (dari npm run analyze)
-└── birminghamplumbingnearme.com/
+└── mysite.com/
     └── ...
 ```
 
@@ -317,7 +339,7 @@ Untuk seluruh pemeriksaan website saat ini dan kedepannya, laporan `qa-summary.m
 npm run report
 
 # Buka laporan untuk target website tertentu:
-npm run report -- smilesbydocford.com
+npm run report -- example.com
 ```
 
 ---
@@ -333,9 +355,9 @@ npm run clean
 npm run clear
 
 # Bersihkan hanya untuk website target tertentu:
-npm run clear -- --target smilesbydocford.com
+npm run clear -- --target example.com
 # atau menggunakan URL langsung:
-npm run clear -- -t https://smilesbydocford.com
+npm run clear -- -t https://example.com
 ```
 
 ---
@@ -468,7 +490,7 @@ playwright/
 │   ├── clean.ts          # Script pembersih folder output cross-platform
 │   └── index.ts          # CLI entry point utama (Commander)
 ├── output/               # Folder hasil output crawling dan analisis
-│   └── <target-domain>/  # Folder output per target website (misal: smilesbydocford.com)
+│   └── <target-domain>/  # Folder output per target website (misal: example.com)
 │       ├── screenshots/  # File PNG Desktop dan Mobile (dengan visual alt badge)
 │       ├── logs/         # File JSON per halaman (log error, alt text lengkap, CTA audit, text snippets)
 │       ├── summary.json  # Ringkasan data crawl & audit
